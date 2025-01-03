@@ -39,9 +39,9 @@ class DuonLabs:
                     "samples": np.stack(tuple(samples.values()), -1).tolist(),
                 },
                 "max_steps": max_steps,
-                "n_scenarii": n_scenarios,
+                "n_scenarios": n_scenarios,
             },
-            timeout=60,
+            timeout=180,
         )
         response.raise_for_status()
         response = response.json()
