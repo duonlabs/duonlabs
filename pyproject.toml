@@ -1,0 +1,7 @@
+[tool.pylint.messages_control]
+disable = [
+    "C0411",
+    # You can list other error codes here that you want to disable
+]
+[tool.ruff]
+line-length = 150
