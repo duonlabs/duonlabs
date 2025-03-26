@@ -96,7 +96,7 @@ forecast = client.forecast(
     pair=pair,
     frequency=frequency,
     candles=candles,
-    steps=20,
+    n_steps=20,
     n_scenarios=256,
     timestamp_unit="ms",
 )
