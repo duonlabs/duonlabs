@@ -10,7 +10,7 @@ client = duonlabs.DuonLabs(token=os.environ['DUONLABS_TOKEN']) # Make sure to se
 forecast = client.forecast(
     pair='BTC/USDT', # Pair to forecast
     frequency='8h', # Frequency of the candles
-    model="voyons-nano", # Optional, model to use
+    model="best", # Optional, model to use
 )
 
 ## How to use the forecast ##

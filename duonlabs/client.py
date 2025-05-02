@@ -1,9 +1,10 @@
 """
-duonlabs.api submodule.
+duonlabs.client submodule.
 
 Copyright (c) 2025 Duon labs
 """
 import os
+import time
 import warnings
 import requests
 
@@ -20,6 +21,17 @@ class DuonLabs:
         "Content-Type": "application/json",
     }
     supported_frequencies: List[str] = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1d"]
+    freq2sec: Dict[str, int] = {
+        "1m": 60,
+        "5m": 5 * 60,
+        "15m": 15 * 60,
+        "30m": 30 * 60,
+        "1h": 60 * 60,
+        "2h": 2 * 60 * 60,
+        "4h": 4 * 60 * 60,
+        "8h": 8 * 60 * 60,
+        "1d": 24 * 60 * 60,
+    }
 
     def __init__(self, token: str, base_url: Optional[str] = None):
         self.headers["Authorization"] = f"Token {token}"
@@ -32,7 +44,7 @@ class DuonLabs:
         candles: Optional[CandleListofLists] = None,
         model: str = "best",
         n_steps: int = 15,
-        n_scenarios: int = 128,
+        n_scenarios: int = 512,
         timestamp_unit: str = "s",
         last_candle: str = "auto",
         tag: Optional[str] = None,
@@ -76,6 +88,8 @@ class DuonLabs:
                 candles = [[candle[0] // 1000] + candle[1:] for candle in candles]
             if last_candle == "closed":
                 candles.pop()
+        if last_candle == "auto":
+            last_candle = "ongoing" if time.time() < candles[-1][0] * (1000 if timestamp_unit == "ms" else 1) + self.freq2sec[frequency] else "closed"
         # Prepare Request
         response = requests.post(
             self.base_url + "scenarios/generation",
