@@ -89,7 +89,7 @@ class DuonLabs:
             if last_candle == "closed":
                 candles.pop()
         if last_candle == "auto":
-            last_candle = "ongoing" if time.time() < candles[-1][0] * (1000 if timestamp_unit == "ms" else 1) + self.freq2sec[frequency] else "closed"
+            last_candle = "ongoing" if time.time() < candles[-1][0] / (1000 if timestamp_unit == "ms" else 1) + self.freq2sec[frequency] else "closed"
         # Prepare Request
         response = requests.post(
             self.base_url + "scenarios/generation",
