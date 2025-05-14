@@ -37,6 +37,17 @@ class DuonLabs:
         self.headers["Authorization"] = f"Token {token}"
         self.base_url = base_url or self.default_base_url
 
+    def _scenario_generation(self, payload: Dict) -> Forecast:
+        response = requests.post(
+            self.base_url + "scenarios/generation",
+            headers=self.headers,
+            json=payload,
+            timeout=360,
+        )
+        response.raise_for_status()
+        response = response.json()
+        return Forecast(candles=payload["inputs"]["candles"], scenarios=response["scenarios"])
+
     def forecast(
         self,
         pair: str,
@@ -91,24 +102,16 @@ class DuonLabs:
         if last_candle == "auto":
             last_candle = "ongoing" if time.time() < candles[-1][0] / (1000 if timestamp_unit == "ms" else 1) + self.freq2sec[frequency] else "closed"
         # Prepare Request
-        response = requests.post(
-            self.base_url + "scenarios/generation",
-            headers=self.headers,
-            json={
-                "inputs": {
-                    "pair": pair,
-                    "frequency": frequency,
-                    "candles": candles,
-                    "timestamp_unit": timestamp_unit,
-                    "last_candle": last_candle,
-                },
-                "model": model,
-                "n_steps": n_steps,
-                "n_scenarios": n_scenarios,
-                "tag": tag,
+        return self._scenario_generation({
+            "inputs": {
+                "pair": pair,
+                "frequency": frequency,
+                "candles": candles,
+                "timestamp_unit": timestamp_unit,
+                "last_candle": last_candle,
             },
-            timeout=360,
-        )
-        response.raise_for_status()
-        response = response.json()
-        return Forecast(candles=candles, scenarios=response["scenarios"])
+            "model": model,
+            "n_steps": n_steps,
+            "n_scenarios": n_scenarios,
+            "tag": tag,
+        })

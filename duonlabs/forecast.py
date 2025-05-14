@@ -8,6 +8,7 @@ import json
 import numpy as np
 
 from typing import Any, Callable, Dict, List, TextIO, Union
+from pathlib import Path
 from contextlib import nullcontext
 
 from .candles import CandleListofLists, CANDLE_CHANNELS_NAME
@@ -39,11 +40,11 @@ class Forecast:
         # Save cutoff close
         self.cutoff_close = self.context["samples"][-1][3]
 
-    def dump(self, f: Union[str, TextIO]):
+    def dump(self, f: Union[str, Path, TextIO]):
         """
         Save the forecast to a json file.
         """
-        with open(f, "w", encoding="utf-8") if isinstance(f, str) else nullcontext(f) as f:
+        with open(f, "w", encoding="utf-8") if isinstance(f, (str, Path)) else nullcontext(f) as f:
             json.dump({
                 "candles": [[t] + s for t, s in zip(self.context["timestamps"].tolist(), self.context["samples"].tolist())],
                 "scenarios": [[[t] + s for t, s in zip(st, ss)] for st, ss in zip(self.scenarios["timestamps"].tolist(), self.scenarios["samples"].tolist())],
@@ -122,10 +123,10 @@ class Forecast:
         return len(self.scenarios["samples"])
 
     @classmethod
-    def load_json(cls, f: Union[str, TextIO]) -> "Forecast":
+    def load_json(cls, f: Union[str, Path, TextIO]) -> "Forecast":
         """
         Load a forecast from a json file.
         """
-        with open(f, "r", encoding="utf-8") if isinstance(f, str) else nullcontext(f) as f:
+        with open(f, "r", encoding="utf-8") if isinstance(f, (str, Path)) else nullcontext(f) as f:
             data = json.load(f)
         return cls(**data)
