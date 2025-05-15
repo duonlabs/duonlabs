@@ -11,34 +11,38 @@ from typing import Any, Callable, Dict, List, TextIO, Union
 from pathlib import Path
 from contextlib import nullcontext
 
-from .candles import CandleListofLists, CANDLE_CHANNELS_NAME
+from .utils import ListofListsofNumbers
 
 
 class Forecast:
-    def __init__(self, candles: CandleListofLists, scenarios: List[CandleListofLists]):
+    channel_names = ["timestamp", "open", "high", "low", "close", "volume"]
+    channel_dtypes = [int, float, float, float, float, float]
+
+    def __init__(self, context: ListofListsofNumbers, scenarios: List[ListofListsofNumbers]):
         """
         Args:
-            candles: List[List[Union[int, float]]] (context_size, 6) | ccxt/binance format:
+            context: List[List[Union[int, float]]] (context_size, 6) | ccxt/binance format:
                 [[timestamp (int), open (float), high (float), low (float), close (float), volume (float)], ...]
             scenarios: List[List[List[Union[int, float]]]] (n_scenarios, context_size, 6) | ccxt/binance format:
                 [[[timestamp (int), open (float), high (float), low (float), close (float), volume (float)], ...], ...]
         """
-        self.context = {"timestamps": [], "samples": []}
-        for candle in candles:
-            self.context["timestamps"].append(candle[0])
-            self.context["samples"].append(candle[1:])
-        self.scenarios = {"timestamps": [], "samples": []}
+        self.n_scenarios = len(scenarios)
+        self.context = {k: [] for k in self.channel_names}
+        for row in context:
+            for c, v in zip(self.channel_names, row):
+                self.context[c].append(v)
+        self.scenarios = []
         for scenario in scenarios:
-            self.scenarios["timestamps"].append([])
-            self.scenarios["samples"].append([])
-            for candle in scenario:
-                self.scenarios["timestamps"][-1].append(candle[0])
-                self.scenarios["samples"][-1].append(candle[1:])
+            scenario_dict = {k: [] for k in self.channel_names}
+            for row in scenario:
+                for c, v in zip(self.channel_names, row):
+                    scenario_dict[c].append(v)
+            self.scenarios.append(scenario_dict)
         # Save as numpy arrays
-        self.context = {"timestamps": np.array(self.context["timestamps"], dtype=np.int64), "samples": np.array(self.context["samples"], dtype=np.float32)}
-        self.scenarios = {"timestamps": np.array(self.scenarios["timestamps"], dtype=np.int64), "samples": np.array(self.scenarios["samples"], dtype=np.float32)}
+        self.context = {k: np.array(v) for k, v in self.context.items()}
+        self.scenarios = [{k: np.array(v) for k, v in scenario.items()} for scenario in self.scenarios] 
         # Save cutoff close
-        self.cutoff_close = self.context["samples"][-1][3]
+        self.cutoff_close = self.context["close"][-1]
 
     def dump(self, f: Union[str, Path, TextIO]):
         """
@@ -46,8 +50,8 @@ class Forecast:
         """
         with open(f, "w", encoding="utf-8") if isinstance(f, (str, Path)) else nullcontext(f) as f:
             json.dump({
-                "candles": [[t] + s for t, s in zip(self.context["timestamps"].tolist(), self.context["samples"].tolist())],
-                "scenarios": [[[t] + s for t, s in zip(st, ss)] for st, ss in zip(self.scenarios["timestamps"].tolist(), self.scenarios["samples"].tolist())],
+                "context": list(map(list, zip(*[v.tolist() for v in self.context.values()]))),
+                "scenarios": [list(map(list, zip(*[v.tolist() for v in scenario.values()]))) for scenario in self.scenarios],
             }, f, indent=2)
 
     def map(self, f: Callable[[np.ndarray, Dict[str, np.ndarray]], Any]) -> List[Any]:
@@ -114,13 +118,13 @@ class Forecast:
         Returns:
             Dict[str, np.ndarray] | Scenario with the keys "timestamp", "open", "high", "low", "close", "volume".
         """
-        return {"timestamp": self.scenarios["timestamps"][index]} | {k: self.scenarios["samples"][index, :, i] for i, k in enumerate(CANDLE_CHANNELS_NAME[1:])}
+        return self.scenarios[index]
 
     def __len__(self) -> int:
         """
         Return the number of scenarios.
         """
-        return len(self.scenarios["samples"])
+        return self.n_scenarios
 
     @classmethod
     def load_json(cls, f: Union[str, Path, TextIO]) -> "Forecast":
