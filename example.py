@@ -26,7 +26,7 @@ p_drop_two_percent = forecast.probability(lambda c: np.any(c["low"] < forecast.c
 # Compute the expectation of a quantity
 exp_hodl_return = forecast.expectation(lambda c: (c["close"][-1] - forecast.cutoff_close) / forecast.cutoff_close) # Expected return of holding the asset
 exp_volatility = forecast.expectation(lambda c: np.std(np.diff(np.log(c["close"]), prepend=np.log(forecast.cutoff_close)))) # Expected volatility
-
+q05_close = forecast.quantile(lambda c: c["close"][-1], 0.05) # Expected 5% quantile of the closing price
 ## How to use DuonLabs with your own data ##
 
 import ccxt # noqa

@@ -64,6 +64,27 @@ class Forecast:
             List[Any] | List of results of the function applied to each scenario.
         """
         return list(map(lambda i: f(self[i]), range(len(self))))
+    
+    def quantile(self, f: Callable[[Dict[str, np.ndarray]], float], q: float) -> float:
+        """
+        Compute the quantile of a quantity.
+        Args:
+            f: Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
+            q: float | Quantile to compute (0 <= q <= 1).
+        Returns:
+            float | Quantile of the quantity of interest.
+        """
+        return np.nanquantile(self.map(f), q).item()
+    
+    def expectation(self, f: Callable[[Dict[str, np.ndarray]], float]) -> float:
+        """
+        Compute the expectation of a quantity.
+        Args:
+            f: Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
+        Returns:
+            float | Expectation of the quantity of interest.
+        """
+        return np.nanmean(self.map(f)).item()
 
     def probability(self, event: Callable[[Dict[str, np.ndarray]], bool]) -> float:
         """
@@ -75,16 +96,6 @@ class Forecast:
             float | Probability of the event happening.
         """
         return self.expectation(lambda s: float(event(s)))
-
-    def expectation(self, f: Callable[[Dict[str, np.ndarray]], float]) -> float:
-        """
-        Compute the expectation of a quantity.
-        Args:
-            f: Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
-        Returns:
-            float | Expectation of the quantity of interest.
-        """
-        return np.nanmean(self.map(f)).item()
 
     def highest(self, f: Union[str, Callable[[Dict[str, np.ndarray]], float]]) -> Dict[str, np.ndarray]:
         """
