@@ -26,9 +26,13 @@ class DuonLabs:
         self.headers["Authorization"] = f"Token {token}"
         self.base_url = base_url or self.default_base_url
 
-    def _scenario_generation(self, payload: Dict) -> Forecast:
+    def _scenario_generation(self, payload: Dict, passthrough: bool = False) -> Forecast:
+        url = self.base_url + "scenarios/generation"
+        if passthrough:
+            url += "?passthrough=true"
+        
         response = requests.post(
-            self.base_url + "scenarios/generation",
+            url,
             headers=self.headers,
             json=payload,
             timeout=360,
@@ -48,6 +52,7 @@ class DuonLabs:
         timestamp_unit: str = "s",
         last_candle: str = "auto",
         tag: Optional[str] = None,
+        passthrough: bool = False,
     ) -> Forecast:
         """
         Args:
@@ -64,6 +69,7 @@ class DuonLabs:
                 Note that if last_candle is set or resolved to "ongoing", the first forecasted candle will be the current one (at its closing time).
                 otherwise, the first forecasted candle will be the next one.
             tag: Optional[str] = None | Optional user defined tag for telemetry
+            passthrough: bool = False | If True, inputs and outputs are not stored (requires special permissions)
         """
         # Validate Inputs
         assert isinstance(pair, str), "pair must be a string"
@@ -103,4 +109,4 @@ class DuonLabs:
             "n_steps": n_steps,
             "n_scenarios": n_scenarios,
             "tag": tag,
-        })
+        }, passthrough=passthrough)
