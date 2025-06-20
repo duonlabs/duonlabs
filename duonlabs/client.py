@@ -35,7 +35,7 @@ class DuonLabs:
         )
         response.raise_for_status()
         response = response.json()
-        return Forecast(context=payload["inputs"]["candles"], scenarios=response["scenarios"])
+        return Forecast(context=payload["inputs"]["candles"], scenarios=response["scenarios"], infos=response["infos"])
 
     def forecast(
         self,
@@ -48,6 +48,7 @@ class DuonLabs:
         timestamp_unit: str = "s",
         last_candle: str = "auto",
         tag: Optional[str] = None,
+        **kwargs
     ) -> Forecast:
         """
         Args:
@@ -103,4 +104,4 @@ class DuonLabs:
             "n_steps": n_steps,
             "n_scenarios": n_scenarios,
             "tag": tag,
-        })
+        }, **kwargs)

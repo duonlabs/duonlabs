@@ -18,7 +18,7 @@ class Forecast:
     channel_names = ["timestamp", "open", "high", "low", "close", "volume"]
     channel_dtypes = [int, float, float, float, float, float]
 
-    def __init__(self, context: ListofListsofNumbers, scenarios: List[ListofListsofNumbers]):
+    def __init__(self, context: ListofListsofNumbers, scenarios: List[ListofListsofNumbers], infos: Dict[str, Any] = None):
         """
         Args:
             context: List[List[Union[int, float]]] (context_size, 6) | ccxt/binance format:
@@ -26,6 +26,7 @@ class Forecast:
             scenarios: List[List[List[Union[int, float]]]] (n_scenarios, context_size, 6) | ccxt/binance format:
                 [[[timestamp (int), open (float), high (float), low (float), close (float), volume (float)], ...], ...]
         """
+        self.infos = infos or {}
         self.n_scenarios = len(scenarios)
         self.context = {k: [] for k in self.channel_names}
         for row in context:
