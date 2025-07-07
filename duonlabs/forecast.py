@@ -18,7 +18,7 @@ class Forecast:
     channel_names = ["timestamp", "open", "high", "low", "close", "volume"]
     channel_dtypes = [int, float, float, float, float, float]
 
-    def __init__(self, context: ListofListsofNumbers, scenarios: List[ListofListsofNumbers], infos: Dict[str, Any] = None):
+    def __init__(self, context: ListofListsofNumbers, scenarios: List[ListofListsofNumbers], infos: Dict[str, Any] = None, channel_names: List[str] = None):
         """
         Args:
             context: List[List[Union[int, float]]] (context_size, 6) | ccxt/binance format:
@@ -28,15 +28,16 @@ class Forecast:
         """
         self.infos = infos or {}
         self.n_scenarios = len(scenarios)
-        self.context = {k: [] for k in self.channel_names}
+        channel_names = channel_names or self.channel_names
+        self.context = {k: [] for k in channel_names}
         for row in context:
-            for c, v in zip(self.channel_names, row):
+            for c, v in zip(channel_names, row):
                 self.context[c].append(v)
         self.scenarios = []
         for scenario in scenarios:
-            scenario_dict = {k: [] for k in self.channel_names}
+            scenario_dict = {k: [] for k in channel_names}
             for row in scenario:
-                for c, v in zip(self.channel_names, row):
+                for c, v in zip(channel_names, row):
                     scenario_dict[c].append(v)
             self.scenarios.append(scenario_dict)
         # Save as numpy arrays

@@ -35,7 +35,8 @@ class DuonLabs:
         )
         response.raise_for_status()
         response = response.json()
-        return Forecast(context=payload["inputs"]["candles"], scenarios=response["scenarios"], infos=response["infos"])
+        columns = payload["inputs"].get("columns", ["timestamp", "open", "high", "low", "close", "volume"])
+        return Forecast(context=payload["inputs"]["steps"], scenarios=response["scenarios"], infos=response["infos"], channel_names=columns)
 
     def forecast(
         self,
@@ -47,6 +48,7 @@ class DuonLabs:
         n_scenarios: int = 512,
         timestamp_unit: str = "s",
         last_candle: str = "auto",
+        columns: Optional[List[str]] = None,
         tag: Optional[str] = None,
         **kwargs
     ) -> Forecast:
@@ -78,17 +80,37 @@ class DuonLabs:
         assert last_candle in {"auto", "closed", "ongoing"}, "last_candle must be 'auto', 'closed' or 'ongoing'"
         # Fetch Latest Data
         if candles is None:
-            try:
-                import ccxt
-            except ImportError:
-                warnings.warn("ccxt module is not installed. Please install it to fetch latest data from the exchange.")
-                return
-            exchange = ccxt.binance()
-            candles = exchange.fetch_ohlcv(pair, frequency, limit=120)
-            if timestamp_unit == "s":
-                candles = [[candle[0] // 1000] + candle[1:] for candle in candles]
+            assert columns is None, "columns must be None if candles is None"
+            # url: https://api.binance.com/api/v3/klines?interval=8h&limit=120&symbol=BTCUSDT'
+            # Headers: {'User-Agent': 'python-requests/2.32.3', 'Accept-Encoding': 'gzip, deflate', 'Accept': '*/*', 'Connection': 'keep-alive'}
+            response = requests.get(
+                f"https://api.binance.com/api/v3/klines?interval={frequency}&limit=120&symbol={pair.replace('/', '')}",
+                timeout=10,
+            )
+            response.raise_for_status()
+            raw_candles = response.json()
+            candles = []
+            for candle in raw_candles:
+                candles.append([
+                    int(candle[0]) // (1000 if timestamp_unit == "s" else 1),  # timestamp
+                    float(candle[1]),  # open
+                    float(candle[2]),  # high
+                    float(candle[3]),  # low
+                    float(candle[4]),  # close
+                    float(candle[5]),  # volume
+                    int(candle[6]),  # close time
+                    float(candle[7]),  # quote asset volume
+                    int(candle[8]),  # number of trades
+                    float(candle[9]),  # taker buy base asset volume
+                    float(candle[10]),  # taker buy quote asset volume
+                ])
+            columns = ["timestamp", "open", "high", "low", "close", "volume", "close_time", "quote_asset_volume", "number_of_trades", "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume"]
             if last_candle == "closed":
                 candles.pop()
+        else:
+            if columns is None:
+                columns = ["timestamp", "open", "high", "low", "close", "volume"]
+            assert isinstance(candles, list) and all(isinstance(candle, list) and len(candle) == len(columns) for candle in candles), "candles must be a list of lists with the same length as columns"
         if last_candle == "auto":
             last_candle = "ongoing" if time.time() < candles[-1][0] / (1000 if timestamp_unit == "ms" else 1) + freq2sec[frequency] else "closed"
         # Prepare Request
@@ -96,7 +118,8 @@ class DuonLabs:
             "inputs": {
                 "pair": pair,
                 "frequency": frequency,
-                "candles": candles,
+                "columns": columns,
+                "steps": candles,
                 "timestamp_unit": timestamp_unit,
                 "last_candle": last_candle,
             },
