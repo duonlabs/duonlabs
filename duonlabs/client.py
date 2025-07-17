@@ -43,6 +43,7 @@ class DuonLabs:
         pair: str,
         frequency: str,
         candles: Optional[ListofListsofNumbers] = None,
+        steps: Optional[ListofListsofNumbers] = None,
         model: str = "best",
         n_steps: int = 15,
         n_scenarios: int = 512,
@@ -74,15 +75,19 @@ class DuonLabs:
         if candles is not None:
             assert isinstance(candles, list), "candles must be a list"
             assert all(isinstance(candle, list) and len(candle) == 6 for candle in candles), "candles must be a list of lists of 6 elements: [timestamp (int), open (float), high (float), low (float), close (float), volume (float)]"
+            assert steps is None
+        if steps is not None:
+            assert isinstance(steps, list), "steps must be a list"
+            assert columns is not None, "columns must be provided if steps is provided"
+            assert all(isinstance(step, list) and len(step) == len(columns) for step in steps), "steps must be a list of lists with the same length as columns"
+            assert candles is None, "candles must be None if steps is provided"
         assert isinstance(n_steps, int) and n_steps > 0, "n_steps must be a positive integer"
         assert isinstance(n_scenarios, int) and n_scenarios > 0, "n_scenarios must be a positive integer"
         assert timestamp_unit in {"s", "ms"}, "timestamp_unit must be 's' or 'ms'"
         assert last_candle in {"auto", "closed", "ongoing"}, "last_candle must be 'auto', 'closed' or 'ongoing'"
         # Fetch Latest Data
-        if candles is None:
+        if candles is None and steps is None:
             assert columns is None, "columns must be None if candles is None"
-            # url: https://api.binance.com/api/v3/klines?interval=8h&limit=120&symbol=BTCUSDT'
-            # Headers: {'User-Agent': 'python-requests/2.32.3', 'Accept-Encoding': 'gzip, deflate', 'Accept': '*/*', 'Connection': 'keep-alive'}
             response = requests.get(
                 f"https://api.binance.com/api/v3/klines?interval={frequency}&limit=120&symbol={pair.replace('/', '')}",
                 timeout=10,
@@ -108,18 +113,19 @@ class DuonLabs:
             if last_candle == "closed":
                 candles.pop()
         else:
+            steps = candles or steps
             if columns is None:
                 columns = ["timestamp", "open", "high", "low", "close", "volume"]
-            assert isinstance(candles, list) and all(isinstance(candle, list) and len(candle) == len(columns) for candle in candles), "candles must be a list of lists with the same length as columns"
+            assert isinstance(steps, list) and all(isinstance(candle, list) and len(candle) == len(columns) for candle in steps), "steps must be a list of lists with the same length as columns"
         if last_candle == "auto":
-            last_candle = "ongoing" if time.time() < candles[-1][0] / (1000 if timestamp_unit == "ms" else 1) + freq2sec[frequency] else "closed"
+            last_candle = "ongoing" if time.time() < steps[-1][0] / (1000 if timestamp_unit == "ms" else 1) + freq2sec[frequency] else "closed"
         # Prepare Request
         return self._scenario_generation({
             "inputs": {
                 "pair": pair,
                 "frequency": frequency,
                 "columns": columns,
-                "steps": candles,
+                "steps": steps,
                 "timestamp_unit": timestamp_unit,
                 "last_candle": last_candle,
             },
