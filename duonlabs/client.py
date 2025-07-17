@@ -113,10 +113,9 @@ class DuonLabs:
             if last_candle == "closed":
                 candles.pop()
         else:
-            steps = candles or steps
             if columns is None:
                 columns = ["timestamp", "open", "high", "low", "close", "volume"]
-            assert isinstance(steps, list) and all(isinstance(candle, list) and len(candle) == len(columns) for candle in steps), "steps must be a list of lists with the same length as columns"
+        steps = candles or steps
         if last_candle == "auto":
             last_candle = "ongoing" if time.time() < steps[-1][0] / (1000 if timestamp_unit == "ms" else 1) + freq2sec[frequency] else "closed"
         # Prepare Request

@@ -8,7 +8,7 @@ import numpy as np
 client = duonlabs.DuonLabs(token=os.environ['DUONLABS_TOKEN']) # Make sure to set the DUONLABS_TOKEN environment variable
 # Generate forecast
 forecast = client.forecast(
-    pair='BTC/USDT', # Pair to forecast
+   pair='BTC/USDT', # Pair to forecast
     frequency='8h', # Frequency of the candles
 )
 ## How to use the forecast ##
@@ -39,6 +39,9 @@ forecast = client.forecast(
     n_scenarios=256, # Optional, number of scenarios to generate
     timestamp_unit="ms", # Optional, unit of the timestamps
 )
+
+## Evaluate a position ##
+returns = forecast.evaluate_trade_idea(tp_levels=forecast.cutoff_close * 1.2, sl_levels=forecast.cutoff_close * 0.9) # Evaluate a trade idea with a take profit of 20% and a stop loss of 10%
 
 ## How to save/load a forecast ##
 
