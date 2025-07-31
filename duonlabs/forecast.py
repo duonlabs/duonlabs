@@ -44,7 +44,7 @@ class Forecast:
         self.context = {k: np.array(v) for k, v in self.context.items()}
         self.scenarios = [{k: np.array(v) for k, v in scenario.items()} for scenario in self.scenarios] 
         # Save cutoff close
-        self.cutoff_close = self.context["close"][-1]
+        self.cutoff_close = self.context["close"][-1].item()
 
     def dump(self, f: Union[str, Path, TextIO]):
         """
@@ -77,6 +77,30 @@ class Forecast:
             float | Quantile of the quantity of interest.
         """
         return np.nanquantile(self.map(f), q).item()
+    
+    def min(self, f: Union[str, Callable[[Dict[str, np.ndarray]], float]]) -> float:
+        """
+        Return the minimum value of a quantity across all scenarios.
+        Args:
+            f: One of:
+                str | Name of the channel to get the minimum value from
+                Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
+        Returns:
+            float | Minimum value of the quantity across all scenarios.
+        """
+        return np.nanmin(self.map((lambda s: s[f].min()) if isinstance(f, str) else f)).item()
+    
+    def max(self, f: Union[str, Callable[[Dict[str, np.ndarray]], float]]) -> float:
+        """
+        Return the maximum value of a quantity across all scenarios.
+        Args:
+            f: One of:
+                str | Name of the channel to get the maximum value from
+                Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
+        Returns:
+            float | Maximum value of the quantity across all scenarios.
+        """
+        return np.nanmax(self.map((lambda s: s[f].max()) if isinstance(f, str) else f)).item()
     
     def expectation(self, f: Callable[[Dict[str, np.ndarray]], float]) -> float:
         """
@@ -122,6 +146,46 @@ class Forecast:
             Dict[str, np.ndarray] | Scenario with the lowest value of the quantity.
         """
         return self[np.argmin(self.map((lambda s: s[f].min()) if isinstance(f, str) else f))]
+
+    def compute_returns(self, tp_levels: np.ndarray, sl_levels: np.ndarray, is_in: bool = False, fees: float = 0.001) -> np.ndarray:
+        """
+        Compute the results of the trade idea based on the take profit and stop loss levels.
+        Args:
+            tp_levels: np.ndarray | Take profit levels, shape (n_steps, 1)
+            sl_levels: np.ndarray | Stop loss levels, shape (n_steps, 1)
+        Returns:
+            np.ndarray | Results of the trade idea, shape (n_scenarios, n_steps, 1)
+        """
+        tp_levels, sl_levels = tp_levels[..., None], sl_levels[..., None]  # [..., 1]
+        tp_trigger_mask = np.stack(self.map(lambda s: s["high"] >= tp_levels))  # [n_scenarios, ..., horizon]
+        sl_trigger_mask = np.stack(self.map(lambda s: s["low"] <= sl_levels))  # [n_scenarios, ..., horizon]
+        tp_trigger_id, sl_trigger_id = tp_trigger_mask.argmax(-1), sl_trigger_mask.argmax(-1)  # [n_scenarios, ...]
+        sl_triggered, tp_triggered = sl_trigger_mask.any(-1), tp_trigger_mask.any(-1)  # [n_scenarios, ...]
+        tp_triggered_first = tp_triggered & (~sl_triggered | (tp_trigger_id < sl_trigger_id))  # [n_scenarios, ...]
+        sl_triggered_first = sl_triggered & (~tp_triggered | (sl_trigger_id <= tp_trigger_id))  # [n_scenarios, ...]
+        returns = np.broadcast_to(np.stack(self.map(lambda s: s["close"][-1]))[(...,) + (None,)*(len(tp_levels.shape) - 1)], tp_triggered_first.shape).copy()  # [n_scenarios, ..., 1]
+        returns[tp_triggered_first] = np.broadcast_to(tp_levels[None, ..., 0], tp_triggered_first.shape)[tp_triggered_first]
+        returns[sl_triggered_first] = np.broadcast_to(sl_levels[None, ..., 0], sl_triggered_first.shape)[sl_triggered_first]
+        return (returns * (1 - fees) - self.cutoff_close * (1.0 + (0.0 if is_in else fees))) / self.cutoff_close
+
+    def evaluate_trade_idea(self, tp_levels: Union[float, np.ndarray], sl_levels: Union[float, np.ndarray]) -> Dict[str, np.ndarray]:
+        """
+        Evaluate a trade idea based on the take profit and stop loss levels.
+        Args:
+            tp_levels: Union[float, np.ndarray] | Take profit levels, can be a single value or an array of shape (n_steps, 1)
+            sl_levels: Union[float, np.ndarray] | Stop loss levels, can be a single value or an array of shape (n_steps, 1)
+        Returns:
+            Dict[str, np.ndarray] | Dictionary with the keys:
+                - expectation: np.ndarray | Expected return of the trade idea, shape (n_scenarios, n_steps, 1)
+                - std: np.ndarray | Standard deviation of the return, shape (n_scenarios, n_steps, 1)
+                - p_tp: np.ndarray | Probability of hitting the take profit, shape (n_scenarios, n_steps, 1)
+                - p_sl: np.ndarray | Probability of hitting the stop loss, shape (n_scenarios, n_steps, 1)
+        """
+        if isinstance(tp_levels, (int, float)):
+            tp_levels = np.array([tp_levels], dtype=np.float32)
+        if isinstance(sl_levels, (int, float)):
+            sl_levels = np.array([sl_levels], dtype=np.float32)
+        return self.compute_returns(tp_levels, sl_levels)[..., 0]
 
     def __getitem__(self, index: int) -> Dict[str, np.ndarray]:
         """

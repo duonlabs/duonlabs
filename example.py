@@ -40,6 +40,9 @@ forecast = client.forecast(
     timestamp_unit="ms", # Optional, unit of the timestamps
 )
 
+## Evaluate a position ##
+returns = forecast.evaluate_trade_idea(tp_levels=forecast.cutoff_close * 1.2, sl_levels=forecast.cutoff_close * 0.9) # Evaluate a trade idea with a take profit of 20% and a stop loss of 10%
+
 ## How to save/load a forecast ##
 
 from duonlabs import Forecast
