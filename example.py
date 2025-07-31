@@ -8,7 +8,7 @@ import numpy as np
 client = duonlabs.DuonLabs(token=os.environ['DUONLABS_TOKEN']) # Make sure to set the DUONLABS_TOKEN environment variable
 # Generate forecast
 forecast = client.forecast(
-   pair='BTC/USDT', # Pair to forecast
+    pair='BTC/USDT', # Pair to forecast
     frequency='8h', # Frequency of the candles
 )
 ## How to use the forecast ##
