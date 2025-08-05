@@ -151,10 +151,10 @@ class Forecast:
         """
         Compute the results of the trade idea based on the take profit and stop loss levels.
         Args:
-            tp_levels: np.ndarray | Take profit levels, shape (n_steps, 1)
-            sl_levels: np.ndarray | Stop loss levels, shape (n_steps, 1)
+            tp_levels: np.ndarray | Take profit levels, shape (...)
+            sl_levels: np.ndarray | Stop loss levels, shape (...)
         Returns:
-            np.ndarray | Results of the trade idea, shape (n_scenarios, n_steps, 1)
+            np.ndarray | Results of the trade idea, shape (n_scenarios, ..., 1)
         """
         tp_levels, sl_levels = tp_levels[..., None], sl_levels[..., None]  # [..., 1]
         tp_trigger_mask = np.stack(self.map(lambda s: s["high"] >= tp_levels))  # [n_scenarios, ..., horizon]
@@ -187,7 +187,7 @@ class Forecast:
             sl_levels = np.array([sl_levels], dtype=np.float32)
         return self.compute_returns(tp_levels, sl_levels)[..., 0]
 
-    def __getitem__(self, index: int) -> Dict[str, np.ndarray]:
+    def __getitem__(self, index: int) -> Union["Forecast", Dict[str, np.ndarray]]:
         """
         Return the scenario at the given index.
         Args:
@@ -195,6 +195,12 @@ class Forecast:
         Returns:
             Dict[str, np.ndarray] | Scenario with the keys "timestamp", "open", "high", "low", "close", "volume".
         """
+        if isinstance(index, slice):
+            shallow_copy = self.__class__.__new__(self.__class__)
+            shallow_copy.__dict__.update(self.__dict__)
+            shallow_copy.scenarios = self.scenarios[index]
+            shallow_copy.n_scenarios = len(shallow_copy.scenarios)
+            return shallow_copy
         return self.scenarios[index]
 
     def __len__(self) -> int:
