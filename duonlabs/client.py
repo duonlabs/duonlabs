@@ -5,10 +5,9 @@ Copyright (c) 2025 Duon labs
 """
 import os
 import time
-import warnings
 import requests
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .utils import ListofListsofNumbers, freq2sec
 from .forecast import Forecast
@@ -21,6 +20,7 @@ class DuonLabs:
         "Content-Type": "application/json",
     }
     supported_frequencies: List[str] = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1d"]
+    context_size: int = 120
 
     def __init__(self, token: str, base_url: Optional[str] = None):
         self.headers["Authorization"] = f"Token {token}"
@@ -37,6 +37,28 @@ class DuonLabs:
         response = response.json()
         columns = payload["inputs"].get("columns", ["timestamp", "open", "high", "low", "close", "volume"])
         return Forecast(context=payload["inputs"]["steps"], scenarios=response["scenarios"], infos=response["infos"], channel_names=columns)
+
+    def fetch_inputs(self, pair: str, frequency: str, timestamp_unit: str = "s") -> Tuple[ListofListsofNumbers, List[str]]:
+        """
+        Fetch historical candle data from Binance API.
+        """
+        response = requests.get(
+            f"https://api.binance.com/api/v3/klines?interval={frequency}&limit={self.context_size}&symbol={pair.replace('/', '')}",
+            timeout=10,
+        )
+        response.raise_for_status()
+        raw_candles = response.json()
+        candles = []
+        for candle in raw_candles:
+            candles.append([
+                int(candle[0]) // (1000 if timestamp_unit == "s" else 1),  # timestamp
+                float(candle[1]),  # open
+                float(candle[2]),  # high
+                float(candle[3]),  # low
+                float(candle[4]),  # close
+                float(candle[5]),  # volume
+            ])
+        return candles, ["timestamp", "open", "high", "low", "close", "volume"]
 
     def forecast(
         self,
@@ -88,28 +110,7 @@ class DuonLabs:
         # Fetch Latest Data
         if candles is None and steps is None:
             assert columns is None, "columns must be None if candles is None"
-            response = requests.get(
-                f"https://api.binance.com/api/v3/klines?interval={frequency}&limit=120&symbol={pair.replace('/', '')}",
-                timeout=10,
-            )
-            response.raise_for_status()
-            raw_candles = response.json()
-            candles = []
-            for candle in raw_candles:
-                candles.append([
-                    int(candle[0]) // (1000 if timestamp_unit == "s" else 1),  # timestamp
-                    float(candle[1]),  # open
-                    float(candle[2]),  # high
-                    float(candle[3]),  # low
-                    float(candle[4]),  # close
-                    float(candle[5]),  # volume
-                    int(candle[6]),  # close time
-                    float(candle[7]),  # quote asset volume
-                    int(candle[8]),  # number of trades
-                    float(candle[9]),  # taker buy base asset volume
-                    float(candle[10]),  # taker buy quote asset volume
-                ])
-            columns = ["timestamp", "open", "high", "low", "close", "volume", "close_time", "quote_asset_volume", "number_of_trades", "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume"]
+            candles, columns = self.fetch_inputs(pair, frequency, timestamp_unit=timestamp_unit)
             if last_candle == "closed":
                 candles.pop()
         else:
