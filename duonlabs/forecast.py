@@ -42,7 +42,7 @@ class Forecast:
             self.scenarios.append(scenario_dict)
         # Save as numpy arrays
         self.context = {k: np.array(v) for k, v in self.context.items()}
-        self.scenarios = [{k: np.array(v) for k, v in scenario.items()} for scenario in self.scenarios] 
+        self.scenarios = [{k: np.array(v) for k, v in scenario.items()} for scenario in self.scenarios]
         # Save cutoff close
         self.cutoff_close = self.context["close"][-1].item()
 
