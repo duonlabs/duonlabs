@@ -13,3 +13,5 @@ freq2sec: Dict[str, int] = {
     "8h": 8 * 60 * 60,
     "1d": 24 * 60 * 60,
 }
+
+sec2freq: Dict[int, str] = {v: k for k, v in freq2sec.items()}
