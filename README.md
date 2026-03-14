@@ -1,32 +1,28 @@
-# 🔮 DuonLabs Forecasting API
+# Duon Labs Python SDK
 
-Forecast crypto markets with probabilistic scenario modeling.
+Calibrated scenario distributions for financial markets. Simulate thousands of plausible futures via the Voyons API.
 
----
-
-## 📦 Installation
-
-Install the package with pip:
+## Installation
 
 ```bash
 pip install duonlabs
 ```
 
-## 🔑 Authentication
+## Authentication
 
-Set your API token:
+Get an API token at [platform.duonlabs.com](https://platform.duonlabs.com), then set it as an environment variable:
 
 ```bash
 export DUONLABS_TOKEN="your_token_here"
 ```
 
-You can get your API token by signing up at [duonlabs.com](https://duonlabs.com).
+Or pass it directly to the client:
 
----
+```python
+client = duonlabs.DuonLabs(token="your_token_here")
+```
 
-## 📈 Quick Start
-
-The first step is to create a client and request a forecast. You can specify the market pair, candle frequency, and model.
+## Quick Start
 
 ```python
 import os
@@ -35,54 +31,64 @@ import duonlabs
 client = duonlabs.DuonLabs(token=os.environ['DUONLABS_TOKEN'])
 
 forecast = client.forecast(
-    pair='BTC/USDT',       # Market pair
-    frequency='8h',        # Candle frequency
-    model='voyons-tiny',   # Optional: specific model
+    pair='BTC/USDT',
+    frequency='8h',
+    model='voyons-tiny',
 )
 ```
 
----
+The `forecast` object contains thousands of simulated price paths. Use it to compute probabilities, expected values, and extract individual scenarios.
 
-## 🔍 Use the Forecast
+## Compute Probabilities
 
-Once you have the forecast, you can use it to compute probabilities, expectations, and extract scenarios.
-
-### Compute Probabilities
-
-You can compute the probability of different events happening in the forecast window:
+Query the probability of any event across the scenario distribution:
 
 ```python
-p_green = forecast.probability(lambda c: c['close'][0] > c['open'][0]) # Probability of the current candle being green
-p_100k = forecast.probability(lambda c: np.any(c['high'] > 100_000)) # Probability of the price reaching 100k at some point in the window
-p_drop_2p = forecast.probability(lambda c: np.any(c["low"] < forecast.cutoff_close * 0.98)) # Probability of the price having a 2% drop at some point in the window
+# Probability of the next candle closing green
+p_green = forecast.probability(lambda c: c['close'][0] > c['open'][0])
+
+# Probability of price reaching 100k at any point in the window
+p_100k = forecast.probability(lambda c: np.any(c['high'] > 100_000))
+
+# Probability of a 2% drop at any point in the window
+p_drop = forecast.probability(
+    lambda c: np.any(c["low"] < forecast.cutoff_close * 0.98)
+)
 ```
 
-### Compute Expectations
+## Compute Expectations
 
-You can compute the expected value of a quantity:
+Calculate expected values over the distribution:
 
 ```python
-exp_return = forecast.expectation(lambda c: (c["close"][-1] - forecast.cutoff_close) / forecast.cutoff_close) # Expected return of holding until the end of the window
-exp_volatility = forecast.expectation(lambda c: np.std(np.diff(np.log(c["close"]), prepend=np.log(forecast.cutoff_close)))) # Expected volatility
+# Expected return over the forecast window
+exp_return = forecast.expectation(
+    lambda c: (c["close"][-1] - forecast.cutoff_close) / forecast.cutoff_close
+)
+
+# Expected volatility
+exp_vol = forecast.expectation(
+    lambda c: np.std(np.diff(np.log(c["close"]), prepend=np.log(forecast.cutoff_close)))
+)
 ```
 
-### Extract Scenarios
+## Extract Scenarios
 
-You can extract scenarios from the forecast based on arbitrary criterias:
+Access individual scenarios by index or by criteria:
 
 ```python
-first = forecast[0] # First scenario
+first = forecast[0]
 
-highest = forecast.highest('high') # Scenario with highest high
-# Scenario with lowest volatility
+highest = forecast.highest('high')
+
 lowest_vol = forecast.lowest(
     lambda c: np.std(np.diff(np.log(c["close"]), prepend=np.log(forecast.cutoff_close)))
 )
 ```
 
----
+## Custom Data
 
-## 🧠 Use with Custom Data
+Bring your own candles from any source:
 
 ```python
 import ccxt
@@ -102,20 +108,19 @@ forecast = client.forecast(
 )
 ```
 
-## Save and Load Forecasts
-
-You can save and load forecasts to and from json files:
+## Save and Load
 
 ```python
 from duonlabs import Forecast
 
-forecast.dump("forecast.json") # Save the forecast to a json file
-forecast = Forecast.load_json("forecast.json") # Load the forecast from a json file
+forecast.dump("forecast.json")
+forecast = Forecast.load_json("forecast.json")
 ```
 
----
+## Links
 
-## 📚 Learn More
-
-- API Reference: [duonlabs.com](https://duonlabs.com)
-- GitHub Repository: [duonlabs/duonlabs](https://github.com/duonlabs/duonlabs)
+- [API Documentation](https://api.duonlabs.com/api/redoc/)
+- [Platform](https://platform.duonlabs.com) (API keys, credits, usage)
+- [Playground](https://playground.duonlabs.com) (interactive sandbox)
+- [x402 Payments](https://www.duonlabs.com/x402) (pay per request, no API key needed)
+- [duonlabs.com](https://www.duonlabs.com)
