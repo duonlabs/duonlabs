@@ -1,7 +1,29 @@
-[tool.pylint.messages_control]
-disable = [
-    "C0411",
-    # You can list other error codes here that you want to disable
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "duonlabs"
+version = "0.0.1"
+description = "Python package to interact with Duonlabs's API"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy", "requests"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
 ]
+
+[project.optional-dependencies]
+ccxt = ["ccxt"]
+pandas = ["pandas>=1.5"]
+dev = ["pytest", "pandas>=1.5"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["duonlabs"]
+
+[tool.pylint.messages_control]
+disable = ["C0411"]
+
 [tool.ruff]
 line-length = 150

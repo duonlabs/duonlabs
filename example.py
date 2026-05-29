@@ -1,51 +1,86 @@
 import os
+import functools
+
 import duonlabs
 import numpy as np
 
-## How to Forecast a pair ##
+MODEL = "best"
 
-# Instantiate duonlabs client
-client = duonlabs.DuonLabs(token=os.environ['DUONLABS_TOKEN']) # Make sure to set the DUONLABS_TOKEN environment variable
-# Generate forecast
-forecast = client.forecast(
-    pair='BTC/USDT', # Pair to forecast
-    frequency='8h', # Frequency of the candles
+## How to Forecast a single pair ##
+
+client = duonlabs.DuonLabs(token=os.environ["DUONLABS_TOKEN"], base_url=os.environ.get("DUONLABS_API_URL"))
+
+fc = client.forecast(
+    keys="binance.spot.BTCUSDT",  # one key for single-pair (next_candle)
+    model=MODEL,
+    frequency="4h",
+    n_steps=10,
+    n_scenarios=1024,
 )
+
+
 ## How to use the forecast ##
 
-# Extract a scenario
-first_scenario = forecast[0] # Extract the first scenario
-highest_high_scenario = forecast.highest('high') # Extract the scenario with the highest high
-lowest_volatility_scenario = forecast.lowest(lambda c: np.std(np.diff(np.log(c["close"]), prepend=np.log(forecast.cutoff_close)))) # Extract the scenario with the lowest volatility
-# Compute the probability of an event
-p_current_candle_green = forecast.probability(lambda c: c['close'][0] > c['open'][0]) # Probability of the current candle being green
-p_100_k = forecast.probability(lambda c: np.any(c['high'] > 100_000)) # Probability of the price reaching 100k at some point in the window
-p_drop_two_percent = forecast.probability(lambda c: np.any(c["low"] < forecast.cutoff_close * 0.98)) # Probability of the price having a 2% drop at some point in the window
-# Compute the expectation of a quantity
-exp_hodl_return = forecast.expectation(lambda c: (c["close"][-1] - forecast.cutoff_close) / forecast.cutoff_close) # Expected return of holding the asset
-exp_volatility = forecast.expectation(lambda c: np.std(np.diff(np.log(c["close"]), prepend=np.log(forecast.cutoff_close)))) # Expected volatility
-q05_close = forecast.quantile(lambda c: c["close"][-1], 0.05) # Expected 5% quantile of the closing price
-## How to use DuonLabs with your own data ##
+# Access values by fully-qualified column name
+btc_close = fc["binance.spot.BTCUSDT.close"]  # shape (n_scenarios, n_steps)
+cutoff = fc.cutoff("binance.spot.BTCUSDT.close")  # last context close
 
-import ccxt # noqa
-binance = ccxt.binance()
-pair, frequency = 'SOL/USDT', '5m'
-bars = binance.fetch_ohlcv(pair, frequency, limit=120) # Fetch the last 120 8h candles
-forecast = client.forecast(
-    pair=pair, # Pair to forecast
-    frequency=frequency, # Frequency of the candles
-    candles=bars, # List of candles
-    n_steps=20, # Optional, number of steps to forecast
-    n_scenarios=256, # Optional, number of scenarios to generate
-    timestamp_unit="ms", # Optional, unit of the timestamps
+# Probabilities and expectations
+p_green = fc.probability(lambda s: s["binance.spot.BTCUSDT.close"][0] > s["binance.spot.BTCUSDT.open"][0])
+p_100k = fc.probability(lambda s: bool(np.any(s["binance.spot.BTCUSDT.high"] > 100_000)))
+p_drop_2p = fc.probability(lambda s: bool(np.any(s["binance.spot.BTCUSDT.low"] < cutoff * 0.98)))
+
+exp_return = fc.expectation(lambda s: (s["binance.spot.BTCUSDT.close"][-1] - cutoff) / cutoff)
+q05_close = fc.quantile(lambda s: float(s["binance.spot.BTCUSDT.close"][-1]), 0.05)
+
+# Extract scenarios
+first = fc.scenario(0)
+highest = fc.highest("binance.spot.BTCUSDT.high")
+lowest_vol = fc.lowest(lambda s: float(np.std(np.diff(np.log(s["binance.spot.BTCUSDT.close"]), prepend=np.log(cutoff)))))
+
+## Multi-pair forecast (multi_asset_candle) ##
+
+# The last key in the list is the primary: factorization is p(BTC | ETH, SOL, context).
+fc_multi = client.forecast(
+    keys=["binance.spot.BTCUSDT", "binance.spot.ETHUSDT", "binance.spot.PAXGUSDT"],
+    frequency="1d",
+    n_steps=10,
+    n_scenarios=512,
+    model=MODEL,
 )
+breakpoint()
+btc_close_given_eth_sol = fc_multi["binance.spot.BTCUSDT.close"].mean(axis=0)
 
-## Evaluate a position ##
-returns = forecast.evaluate_trade_idea(tp_levels=forecast.cutoff_close * 1.2, sl_levels=forecast.cutoff_close * 0.9) # Evaluate a trade idea with a take profit of 20% and a stop loss of 10%
+## Custom data (any provider/market — bring your own dataframes) ##
 
-## How to save/load a forecast ##
+from duonlabs.utils import steps_from_frames  # noqa: E402
 
-from duonlabs import Forecast
+# import pandas as pd
+# eth_df, btc_df = ...  # index=timestamp (unix s), cols=open/high/low/close/volume
+# steps = steps_from_frames({"binance.spot.ETHUSDT": eth_df, "binance.spot.BTCUSDT": btc_df})
+# fc = client.forecast(keys=["binance.spot.ETHUSDT", "binance.spot.BTCUSDT"], steps=steps, n_steps=10)
 
-forecast.dump("forecast.json") # Save the forecast to a json file
-forecast = Forecast.load_json("forecast.json") # Load the forecast from a json file
+## Custom data via ccxt ##
+
+# import ccxt
+# binance = ccxt.binance()
+# rows = {
+#     "binance.spot.SOLUSDT": binance.fetch_ohlcv("SOL/USDT", "5m", limit=200),
+#     "binance.spot.BTCUSDT": binance.fetch_ohlcv("BTC/USDT", "5m", limit=200),
+# }
+# steps = duonlabs.utils.steps_from_ccxt(rows)  # ms by default
+# fc = client.forecast(keys=list(rows.keys()), steps=steps, n_steps=20, n_scenarios=512)
+
+## Save and load ##
+
+fc.dump("forecast.json")
+fc_loaded = duonlabs.Forecast.load_json("forecast.json")
+assert fc_loaded.columns == fc.columns
+
+## Legacy v1 SDK ##
+
+# Users on legacy models (`voyons-tiny-26.4-backtest`, ...) can keep using the v1 surface:
+# from duonlabs.legacy import DuonLabs as LegacyDuonLabs
+# legacy_client = LegacyDuonLabs(token=os.environ["DUONLABS_TOKEN"])
+# legacy_fc = legacy_client.forecast(pair="BTC/USDT", frequency="8h", model="voyons-tiny-26.4-backtest")
+# legacy_fc["close"]  # legacy flat OHLCV access

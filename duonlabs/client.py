@@ -1,32 +1,108 @@
 """
-duonlabs.client submodule.
+duonlabs.client — v2 DuonLabs client.
+
+Speaks the Voyons v2 inference dialect: fully-qualified column names,
+unix-second timestamps, and a `task` field inferred from the number of keys.
 
 Copyright (c) 2025 Duon labs
 """
+
 import os
-import time
 import requests
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Union
 
-from .utils import ListofListsofNumbers, freq2sec
 from .forecast import Forecast
+from .utils import _assemble_columns, _validate_steps_shape
+
+
+SUPPORTED_FREQUENCIES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1d"]
+
+_FREQ_SECONDS: Dict[str, int] = {
+    "1m": 60, "5m": 5 * 60, "15m": 15 * 60, "30m": 30 * 60,
+    "1h": 60 * 60, "2h": 2 * 60 * 60, "4h": 4 * 60 * 60, "8h": 8 * 60 * 60,
+    "1d": 24 * 60 * 60,
+}
+
+CONTEXT_SIZE = 256
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 
 
 class DuonLabs:
+    """Client for the Voyons v2 forecasting API."""
+
     default_base_url: str = os.getenv("DUONLABS_API_URL", "https://api.duonlabs.com/v1/")
-    headers: Dict[str, str] = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-    supported_frequencies: List[str] = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1d"]
-    context_size: int = 200
 
     def __init__(self, token: str, base_url: Optional[str] = None):
-        self.headers["Authorization"] = f"Token {token}"
+        """
+        Args:
+            token: API token, sent as `Authorization: Token <token>`.
+            base_url: Override the API root. Defaults to `$DUONLABS_API_URL` or the production URL.
+        """
+        self.headers: Dict[str, str] = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Token {token}",
+        }
         self.base_url = base_url or self.default_base_url
 
-    def _scenario_generation(self, payload: Dict) -> Forecast:
+    def forecast(
+        self,
+        keys: Union[str, List[str]],
+        frequency: Optional[str] = None,
+        steps: Optional[Dict[str, Any]] = None,
+        model: str = "best",
+        n_steps: int = 10,
+        n_scenarios: int = 1024,
+        seed: Optional[int] = None,
+        top_p: Optional[float] = None,
+        tag: Optional[str] = None,
+    ) -> Forecast:
+        """Generate a forecast for one or more pair keys.
+
+        Args:
+            keys: One key (`"binance.spot.BTCUSDT"`) or a list of keys for multi-pair.
+                The last key in the list is the primary in multi-pair forecasts.
+            frequency: Candle frequency (e.g. `"4h"`). Required only when `steps` is not provided.
+            steps: Pre-built `{columns, steps}` payload (use `duonlabs.utils.steps_from_*` helpers).
+                When `None`, the SDK fetches from binance for every key.
+            model: Model identifier; `"best"` resolves to a current production model.
+            n_steps: Forecast horizon (number of future timesteps).
+            n_scenarios: Number of parallel sampled scenarios.
+            seed: RNG seed; server picks one if omitted.
+            top_p: Nucleus sampling threshold; server default if omitted.
+            tag: User-defined telemetry tag.
+
+        Returns:
+            A `Forecast` indexed by fully-qualified column names.
+        """
+        keys_list = [keys] if isinstance(keys, str) else list(keys)
+        if not keys_list or not all(isinstance(k, str) for k in keys_list):
+            raise ValueError("keys must be a non-empty str or list[str]")
+        if steps is None:
+            if frequency is None:
+                raise ValueError("frequency is required when steps is not provided")
+            if frequency not in SUPPORTED_FREQUENCIES:
+                raise ValueError(f"frequency must be one of {SUPPORTED_FREQUENCIES}")
+            steps = self.fetch_steps(keys_list, frequency)
+        else:
+            if "columns" not in steps or "steps" not in steps:
+                raise ValueError("steps must be a dict with 'columns' and 'steps' keys")
+            _validate_steps_shape(steps["columns"], steps["steps"])
+        task = "next_candle" if len(keys_list) == 1 else "multi_asset_candle"
+        payload: Dict[str, Any] = {
+            "inputs": {"columns": steps["columns"], "steps": steps["steps"]},
+            "task": task,
+            "n_steps": n_steps,
+            "n_scenarios": n_scenarios,
+            "model": model,
+        }
+        if seed is not None:
+            payload["seed"] = seed
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if tag is not None:
+            payload["tag"] = tag
         response = requests.post(
             self.base_url + "scenarios/generation",
             headers=self.headers,
@@ -34,103 +110,86 @@ class DuonLabs:
             timeout=360,
         )
         response.raise_for_status()
-        response = response.json()
-        columns = payload["inputs"].get("columns", ["timestamp", "open", "high", "low", "close", "volume"])
-        return Forecast(context=payload["inputs"]["steps"], scenarios=response["scenarios"], infos=response["infos"], channel_names=columns)
-
-    def fetch_inputs(self, pair: str, frequency: str, timestamp_unit: str = "s") -> Tuple[ListofListsofNumbers, List[str]]:
-        """
-        Fetch historical candle data from Binance API.
-        """
-        response = requests.get(
-            f"https://api.binance.com/api/v3/klines?interval={frequency}&limit={self.context_size}&symbol={pair.replace('/', '')}",
-            timeout=10,
+        body = response.json()
+        infos = dict(body.get("infos") or {})
+        infos.setdefault("model", model)
+        if frequency is not None:
+            infos.setdefault("frequency", frequency)
+        if seed is not None:
+            infos.setdefault("seed", seed)
+        return Forecast(
+            columns=body.get("columns", steps["columns"]),
+            context_steps=steps["steps"],
+            scenarios=body["scenarios"],
+            infos=infos,
         )
-        response.raise_for_status()
-        raw_candles = response.json()
-        candles = []
-        for candle in raw_candles:
-            candles.append([
-                int(candle[0]) // (1000 if timestamp_unit == "s" else 1),  # timestamp
-                float(candle[1]),  # open
-                float(candle[2]),  # high
-                float(candle[3]),  # low
-                float(candle[4]),  # close
-                float(candle[5]),  # volume
-            ])
-        return candles, ["timestamp", "open", "high", "low", "close", "volume"]
 
-    def forecast(
-        self,
-        pair: str,
-        frequency: str,
-        candles: Optional[ListofListsofNumbers] = None,
-        steps: Optional[ListofListsofNumbers] = None,
-        model: str = "best",
-        n_steps: int = 15,
-        n_scenarios: int = 512,
-        timestamp_unit: str = "s",
-        last_candle: str = "auto",
-        columns: Optional[List[str]] = None,
-        tag: Optional[str] = None,
-        **kwargs
-    ) -> Forecast:
-        """
+    def fetch_steps(self, keys: Union[str, List[str]], frequency: str) -> Dict[str, Any]:
+        """Fetch OHLCV candles from binance for every key and assemble a wire-format payload.
+
+        Only `binance.spot.*` keys are supported in the fetch path. For other providers/markets,
+        load data yourself and pass it via `steps=duonlabs.utils.steps_from_*(...)`.
+
         Args:
-            pair: str | Name of the pair to forecast.
-            frequency: str | Frequency of the candles (1m, 5m, 30m, 2h, 8h, 1d).
-            candles: List[List[Union[int, float]]] (context_size, 6) | ccxt/binance format:
-                [[timestamp (int), open (float), high (float), low (float), close (float), volume (float)], ...]
-                If None, the model will fetch latest data from the exchange.
-            n_steps: int = 15 | Number of sampling steps
-            n_scenarios: int = 32 | Number of scenarios to generate
-            timestamp_unit: ("s" | "ms") = "ms" | Unit of the timestamps
-            last_candle: ("auto" | "closed" | "ongoing") = "auto" | How to handle the last candle.
-                Auto will assume that the informations sent are the most up to date and use the current timestamp to decide
-                Note that if last_candle is set or resolved to "ongoing", the first forecasted candle will be the current one (at its closing time).
-                otherwise, the first forecasted candle will be the next one.
-            tag: Optional[str] = None | Optional user defined tag for telemetry
+            keys: One key or a list of keys.
+            frequency: Candle frequency (e.g. `"4h"`).
+
+        Returns:
+            `{"columns": [...], "steps": [...]}` aligned across all keys.
         """
-        # Validate Inputs
-        assert isinstance(pair, str), "pair must be a string"
-        assert frequency in self.supported_frequencies, f"frequency must be one of {self.supported_frequencies}"
-        if candles is not None:
-            assert isinstance(candles, list), "candles must be a list"
-            assert all(isinstance(candle, list) and len(candle) == 6 for candle in candles), "candles must be a list of lists of 6 elements: [timestamp (int), open (float), high (float), low (float), close (float), volume (float)]"
-            assert steps is None
-        if steps is not None:
-            assert isinstance(steps, list), "steps must be a list"
-            assert columns is not None, "columns must be provided if steps is provided"
-            assert all(isinstance(step, list) and len(step) == len(columns) for step in steps), "steps must be a list of lists with the same length as columns"
-            assert candles is None, "candles must be None if steps is provided"
-        assert isinstance(n_steps, int) and n_steps > 0, "n_steps must be a positive integer"
-        assert isinstance(n_scenarios, int) and n_scenarios > 0, "n_scenarios must be a positive integer"
-        assert timestamp_unit in {"s", "ms"}, "timestamp_unit must be 's' or 'ms'"
-        assert last_candle in {"auto", "closed", "ongoing"}, "last_candle must be 'auto', 'closed' or 'ongoing'"
-        # Fetch Latest Data
-        if candles is None and steps is None:
-            assert columns is None, "columns must be None if candles is None"
-            candles, columns = self.fetch_inputs(pair, frequency, timestamp_unit=timestamp_unit)
-            if last_candle == "closed":
-                candles.pop()
-        else:
-            if columns is None:
-                columns = ["timestamp", "open", "high", "low", "close", "volume"]
-        steps = candles or steps
-        if last_candle == "auto":
-            last_candle = "ongoing" if time.time() < steps[-1][0] / (1000 if timestamp_unit == "ms" else 1) + freq2sec[frequency] else "closed"
-        # Prepare Request
-        return self._scenario_generation({
-            "inputs": {
-                "pair": pair,
-                "frequency": frequency,
-                "columns": columns,
-                "steps": steps,
-                "timestamp_unit": timestamp_unit,
-                "last_candle": last_candle,
-            },
-            "model": model,
-            "n_steps": n_steps,
-            "n_scenarios": n_scenarios,
-            "tag": tag,
-        }, **kwargs)
+        keys_list = [keys] if isinstance(keys, str) else list(keys)
+        if frequency not in SUPPORTED_FREQUENCIES:
+            raise ValueError(f"frequency must be one of {SUPPORTED_FREQUENCIES}")
+        freq_seconds = _FREQ_SECONDS[frequency]
+        per_key: Dict[str, List[List[float]]] = {}
+        per_key_ts: Dict[str, List[int]] = {}
+        for key in keys_list:
+            symbol = self._binance_symbol(key)
+            r = requests.get(
+                BINANCE_KLINES_URL,
+                params={"interval": frequency, "limit": CONTEXT_SIZE, "symbol": symbol},
+                timeout=10,
+            )
+            r.raise_for_status()
+            ts: List[int] = []
+            ohlcv: List[List[float]] = []
+            for row in r.json():
+                ts.append(int(row[0]) // 1000)
+                ohlcv.append([float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
+            per_key_ts[key] = ts
+            per_key[key] = ohlcv
+        ## Cross-key alignment: every key must have the same timestamp set
+        ref_key = keys_list[0]
+        ref_ts = per_key_ts[ref_key]
+        for key in keys_list[1:]:
+            if per_key_ts[key] != ref_ts:
+                raise ValueError(
+                    f"binance returned misaligned timestamps for {key!r} vs {ref_key!r}; "
+                    "fetch data yourself and pass via duonlabs.utils.steps_from_frames"
+                )
+        ## Drop the partial last candle if its close-time is in the future
+        import time as _time
+        while ref_ts and ref_ts[-1] + freq_seconds > _time.time():
+            ref_ts = ref_ts[:-1]
+            for key in keys_list:
+                per_key[key] = per_key[key][:-1]
+        columns = _assemble_columns(keys_list)
+        steps: List[List[Union[int, float]]] = []
+        for i, t in enumerate(ref_ts):
+            row: List[Union[int, float]] = [t]
+            for key in keys_list:
+                row.extend(per_key[key][i])
+            steps.append(row)
+        _validate_steps_shape(columns, steps)
+        return {"columns": columns, "steps": steps}
+
+    @staticmethod
+    def _binance_symbol(key: str) -> str:
+        """Parse a `binance.spot.SYMBOL` key into the symbol used by the binance klines endpoint."""
+        parts = key.split(".")
+        if len(parts) != 3 or parts[0] != "binance" or parts[1] != "spot":
+            raise ValueError(
+                f"binance fetch only supports keys of the form 'binance.spot.SYMBOL' (got {key!r}); "
+                "for other providers/markets, fetch data yourself and pass via duonlabs.utils.steps_from_frames"
+            )
+        return parts[2]

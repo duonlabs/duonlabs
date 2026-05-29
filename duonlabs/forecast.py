@@ -1,5 +1,9 @@
 """
-duonlabs.forecast submodule.
+duonlabs.forecast — v2 Forecast object.
+
+Stores context + sampled scenarios as column-major numpy arrays keyed by
+fully-qualified column names (e.g. "binance.spot.BTCUSDT.close"). Single-pair
+and multi-pair share the same access pattern.
 
 Copyright (c) 2025 Duon labs
 """
@@ -7,213 +11,206 @@ Copyright (c) 2025 Duon labs
 import json
 import numpy as np
 
-from typing import Any, Callable, Dict, List, TextIO, Union
+from typing import Any, Callable, Dict, List, Union
 from pathlib import Path
-from contextlib import nullcontext
 
-from .utils import ListofListsofNumbers
+
+def _derive_keys(columns: List[str]) -> List[str]:
+    """Extract the ordered, deduplicated list of pair keys from a column list.
+
+    A column name is `key.field` (e.g. `binance.spot.BTCUSDT.open`); the key is
+    everything before the last dot. The `timestamp` column has no key.
+    """
+    keys: List[str] = []
+    seen = set()
+    for c in columns:
+        if c == "timestamp":
+            continue
+        k = c.rsplit(".", 1)[0]
+        if k not in seen:
+            seen.add(k)
+            keys.append(k)
+    return keys
+
+
+def _columns_to_arrays(columns: List[str], rows: List[List[Union[int, float]]]) -> Dict[str, np.ndarray]:
+    """Transpose row-major steps into a column-name → 1-D numpy array dict."""
+    if not rows:
+        return {c: np.array([]) for c in columns}
+    arr = np.asarray(rows, dtype=np.float64)
+    return {c: arr[:, i] for i, c in enumerate(columns)}
 
 
 class Forecast:
-    channel_names = ["timestamp", "open", "high", "low", "close", "volume"]
-    channel_dtypes = [int, float, float, float, float, float]
+    """A sampled forecast over one or more pair keys.
 
-    def __init__(self, context: ListofListsofNumbers, scenarios: List[ListofListsofNumbers], infos: Dict[str, Any] = None, channel_names: List[str] = None):
+    Attributes:
+        columns: ["timestamp", "<key>.open", "<key>.high", ...] — wire-format column order.
+        keys: Ordered list of pair keys derived from `columns`.
+        context: column_name → np.ndarray (T_ctx,) — historical input.
+        scenarios: column_name → np.ndarray (n_scenarios, n_steps) — sampled future.
+        timestamps: np.ndarray (n_steps,) — generated step timestamps.
+        context_timestamps: np.ndarray (T_ctx,) — historical timestamps.
+        infos: dict — request metadata (model, seed, frequency, ...).
+    """
+
+    def __init__(
+        self,
+        columns: List[str],
+        context_steps: List[List[Union[int, float]]],
+        scenarios: List[List[List[Union[int, float]]]],
+        infos: Dict[str, Any] = None,
+    ):
         """
         Args:
-            context: List[List[Union[int, float]]] (context_size, 6) | ccxt/binance format:
-                [[timestamp (int), open (float), high (float), low (float), close (float), volume (float)], ...]
-            scenarios: List[List[List[Union[int, float]]]] (n_scenarios, context_size, 6) | ccxt/binance format:
-                [[[timestamp (int), open (float), high (float), low (float), close (float), volume (float)], ...], ...]
+            columns: Wire-format column names. `columns[0]` must be "timestamp".
+            context_steps: (T_ctx, len(columns)) historical rows.
+            scenarios: (n_scenarios, n_steps, len(columns)) sampled future rows.
+            infos: Optional metadata dict.
         """
-        self.infos = infos or {}
+        if not columns or columns[0] != "timestamp":
+            raise ValueError("columns[0] must be 'timestamp'")
+        self.columns = list(columns)
+        self.keys = _derive_keys(self.columns)
+        self.infos = dict(infos) if infos else {}
+        ## Context: column → (T_ctx,)
+        ctx_arrays = _columns_to_arrays(self.columns, context_steps)
+        self.context_timestamps = ctx_arrays["timestamp"].astype(np.int64)
+        self.context = {c: ctx_arrays[c] for c in self.columns if c != "timestamp"}
+        ## Scenarios: column → (n_scenarios, n_steps)
         self.n_scenarios = len(scenarios)
-        channel_names = channel_names or self.channel_names
-        self.context = {k: [] for k in channel_names}
-        for row in context:
-            for c, v in zip(channel_names, row):
-                self.context[c].append(v)
-        self.scenarios = []
-        for scenario in scenarios:
-            scenario_dict = {k: [] for k in channel_names}
-            for row in scenario:
-                for c, v in zip(channel_names, row):
-                    scenario_dict[c].append(v)
-            self.scenarios.append(scenario_dict)
-        # Save as numpy arrays
-        self.context = {k: np.array(v) for k, v in self.context.items()}
-        self.scenarios = [{k: np.array(v) for k, v in scenario.items()} for scenario in self.scenarios]
-        # Save cutoff close
-        self.cutoff_close = self.context["close"][-1].item()
+        if scenarios and scenarios[0]:
+            self.n_steps = len(scenarios[0])
+            ## Stack into (n_scenarios, n_steps, n_cols), then split column-wise
+            arr = np.asarray(scenarios, dtype=np.float64)
+            self.timestamps = arr[0, :, 0].astype(np.int64)
+            self.scenarios: Dict[str, np.ndarray] = {
+                c: arr[:, :, i] for i, c in enumerate(self.columns) if c != "timestamp"
+            }
+        else:
+            self.n_steps = 0
+            self.timestamps = np.array([], dtype=np.int64)
+            self.scenarios = {c: np.zeros((self.n_scenarios, 0)) for c in self.columns if c != "timestamp"}
 
-    def dump(self, f: Union[str, Path, TextIO]):
-        """
-        Save the forecast to a json file.
-        """
-        with open(f, "w", encoding="utf-8") if isinstance(f, (str, Path)) else nullcontext(f) as f:
-            json.dump({
-                "context": list(map(list, zip(*[v.tolist() for v in self.context.values()]))),
-                "scenarios": [list(map(list, zip(*[v.tolist() for v in scenario.values()]))) for scenario in self.scenarios],
-            }, f, indent=2)
-
-    def map(self, f: Callable[[np.ndarray, Dict[str, np.ndarray]], Any]) -> List[Any]:
-        """
-        Apply a function to each scenario.
-        Args:
-            f: Callable[[Dict[str, np.ndarray]], Any] | Function to apply to each scenario.
-                The argument is a dictionary with the keys "timestamp", "open", "high", "low", "close", "volume".
-        Returns:
-            List[Any] | List of results of the function applied to each scenario.
-        """
-        return list(map(lambda i: f(self[i]), range(len(self))))
-    
-    def quantile(self, f: Callable[[Dict[str, np.ndarray]], float], q: float) -> float:
-        """
-        Compute the quantile of a quantity.
-        Args:
-            f: Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
-            q: float | Quantile to compute (0 <= q <= 1).
-        Returns:
-            float | Quantile of the quantity of interest.
-        """
-        return np.nanquantile(self.map(f), q).item()
-    
-    def min(self, f: Union[str, Callable[[Dict[str, np.ndarray]], float]]) -> float:
-        """
-        Return the minimum value of a quantity across all scenarios.
-        Args:
-            f: One of:
-                str | Name of the channel to get the minimum value from
-                Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
-        Returns:
-            float | Minimum value of the quantity across all scenarios.
-        """
-        return np.nanmin(self.map((lambda s: s[f].min()) if isinstance(f, str) else f)).item()
-    
-    def max(self, f: Union[str, Callable[[Dict[str, np.ndarray]], float]]) -> float:
-        """
-        Return the maximum value of a quantity across all scenarios.
-        Args:
-            f: One of:
-                str | Name of the channel to get the maximum value from
-                Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
-        Returns:
-            float | Maximum value of the quantity across all scenarios.
-        """
-        return np.nanmax(self.map((lambda s: s[f].max()) if isinstance(f, str) else f)).item()
-    
-    def expectation(self, f: Callable[[Dict[str, np.ndarray]], float]) -> float:
-        """
-        Compute the expectation of a quantity.
-        Args:
-            f: Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
-        Returns:
-            float | Expectation of the quantity of interest.
-        """
-        return np.nanmean(self.map(f)).item()
-
-    def probability(self, event: Callable[[Dict[str, np.ndarray]], bool]) -> float:
-        """
-        Compute the probability of an event.
-        Args:
-            event: Callable[[Dict[str, np.ndarray]], bool] | Function that takes a scenario and returns a boolean.
-                The boolean indicates if the event happened in the scenario.
-        Returns:
-            float | Probability of the event happening.
-        """
-        return self.expectation(lambda s: float(event(s)))
-
-    def highest(self, f: Union[str, Callable[[Dict[str, np.ndarray]], float]]) -> Dict[str, np.ndarray]:
-        """
-        Return the scenario having the highest value of a quantity.
-        Args:
-            f: One of:
-                str | Name of the channel to maximize
-                Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
-        Returns:
-            Dict[str, np.ndarray] | Scenario with the highest value of the quantity.
-        """
-        return self[np.argmax(self.map((lambda s: s[f].max()) if isinstance(f, str) else f))]
-
-    def lowest(self, f: Union[str, Callable[[np.ndarray, Dict[str, np.ndarray]], float]]) -> Dict[str, np.ndarray]:
-        """
-        Return the scenario having the lowest value of a quantity.
-        Args:
-            f: One of:
-                str | Name of the channel to minimize
-                Callable[[Dict[str, np.ndarray]], float] | Function that computes the quantity of interest given a scenario.
-        Returns:
-            Dict[str, np.ndarray] | Scenario with the lowest value of the quantity.
-        """
-        return self[np.argmin(self.map((lambda s: s[f].min()) if isinstance(f, str) else f))]
-
-    def compute_returns(self, tp_levels: np.ndarray, sl_levels: np.ndarray, is_in: bool = False, fees: float = 0.001) -> np.ndarray:
-        """
-        Compute the results of the trade idea based on the take profit and stop loss levels.
-        Args:
-            tp_levels: np.ndarray | Take profit levels, shape (...)
-            sl_levels: np.ndarray | Stop loss levels, shape (...)
-        Returns:
-            np.ndarray | Results of the trade idea, shape (n_scenarios, ..., 1)
-        """
-        tp_levels, sl_levels = tp_levels[..., None], sl_levels[..., None]  # [..., 1]
-        tp_trigger_mask = np.stack(self.map(lambda s: s["high"] >= tp_levels))  # [n_scenarios, ..., horizon]
-        sl_trigger_mask = np.stack(self.map(lambda s: s["low"] <= sl_levels))  # [n_scenarios, ..., horizon]
-        tp_trigger_id, sl_trigger_id = tp_trigger_mask.argmax(-1), sl_trigger_mask.argmax(-1)  # [n_scenarios, ...]
-        sl_triggered, tp_triggered = sl_trigger_mask.any(-1), tp_trigger_mask.any(-1)  # [n_scenarios, ...]
-        tp_triggered_first = tp_triggered & (~sl_triggered | (tp_trigger_id < sl_trigger_id))  # [n_scenarios, ...]
-        sl_triggered_first = sl_triggered & (~tp_triggered | (sl_trigger_id <= tp_trigger_id))  # [n_scenarios, ...]
-        returns = np.broadcast_to(np.stack(self.map(lambda s: s["close"][-1]))[(...,) + (None,)*(len(tp_levels.shape) - 1)], tp_triggered_first.shape).copy()  # [n_scenarios, ..., 1]
-        returns[tp_triggered_first] = np.broadcast_to(tp_levels[None, ..., 0], tp_triggered_first.shape)[tp_triggered_first]
-        returns[sl_triggered_first] = np.broadcast_to(sl_levels[None, ..., 0], sl_triggered_first.shape)[sl_triggered_first]
-        return (returns * (1 - fees) - self.cutoff_close * (1.0 + (0.0 if is_in else fees))) / self.cutoff_close
-
-    def evaluate_trade_idea(self, tp_levels: Union[float, np.ndarray], sl_levels: Union[float, np.ndarray]) -> Dict[str, np.ndarray]:
-        """
-        Evaluate a trade idea based on the take profit and stop loss levels.
-        Args:
-            tp_levels: Union[float, np.ndarray] | Take profit levels, can be a single value or an array of shape (n_steps, 1)
-            sl_levels: Union[float, np.ndarray] | Stop loss levels, can be a single value or an array of shape (n_steps, 1)
-        Returns:
-            Dict[str, np.ndarray] | Dictionary with the keys:
-                - expectation: np.ndarray | Expected return of the trade idea, shape (n_scenarios, n_steps, 1)
-                - std: np.ndarray | Standard deviation of the return, shape (n_scenarios, n_steps, 1)
-                - p_tp: np.ndarray | Probability of hitting the take profit, shape (n_scenarios, n_steps, 1)
-                - p_sl: np.ndarray | Probability of hitting the stop loss, shape (n_scenarios, n_steps, 1)
-        """
-        if isinstance(tp_levels, (int, float)):
-            tp_levels = np.array([tp_levels], dtype=np.float32)
-        if isinstance(sl_levels, (int, float)):
-            sl_levels = np.array([sl_levels], dtype=np.float32)
-        return self.compute_returns(tp_levels, sl_levels)[..., 0]
-
-    def __getitem__(self, index: int) -> Union["Forecast", Dict[str, np.ndarray]]:
-        """
-        Return the scenario at the given index.
-        Args:
-            index: int | Index of the scenario to return.
-        Returns:
-            Dict[str, np.ndarray] | Scenario with the keys "timestamp", "open", "high", "low", "close", "volume".
-        """
-        if isinstance(index, slice):
-            shallow_copy = self.__class__.__new__(self.__class__)
-            shallow_copy.__dict__.update(self.__dict__)
-            shallow_copy.scenarios = self.scenarios[index]
-            shallow_copy.n_scenarios = len(shallow_copy.scenarios)
-            return shallow_copy
-        return self.scenarios[index]
+    def __getitem__(self, col_name: str) -> np.ndarray:
+        """Return the scenarios array for `col_name`, shape (n_scenarios, n_steps)."""
+        if col_name not in self.scenarios:
+            raise KeyError(f"unknown column {col_name!r}; available: {list(self.scenarios.keys())}")
+        return self.scenarios[col_name]
 
     def __len__(self) -> int:
-        """
-        Return the number of scenarios.
-        """
         return self.n_scenarios
 
+    def cutoff(self, col_name: str) -> float:
+        """Last historical value for `col_name` (scalar)."""
+        if col_name not in self.context:
+            raise KeyError(f"unknown column {col_name!r}; available: {list(self.context.keys())}")
+        return float(self.context[col_name][-1])
+
+    def scenario(self, index: Union[int, slice]) -> Union["Forecast", Dict[str, np.ndarray]]:
+        """Get a single scenario (int) as a {column: (n_steps,)} dict, or a sliced Forecast."""
+        if isinstance(index, slice):
+            shallow = self.__class__.__new__(self.__class__)
+            shallow.__dict__.update(self.__dict__)
+            shallow.scenarios = {c: v[index] for c, v in self.scenarios.items()}
+            shallow.n_scenarios = next(iter(shallow.scenarios.values())).shape[0] if shallow.scenarios else 0
+            return shallow
+        return {c: v[index] for c, v in self.scenarios.items()}
+
+    def map(self, f: Callable[[Dict[str, np.ndarray]], Any]) -> List[Any]:
+        """Apply `f` to every scenario dict. Returns a list of length n_scenarios."""
+        return [f(self.scenario(i)) for i in range(self.n_scenarios)]
+
+    def _resolve(self, arg: Union[str, Callable]) -> Callable[[Dict[str, np.ndarray]], float]:
+        """Turn a column name or callable into a per-scenario scalar function."""
+        if isinstance(arg, str):
+            if arg not in self.scenarios:
+                raise KeyError(f"unknown column {arg!r}; available: {list(self.scenarios.keys())}")
+            return lambda s, _arg=arg: s[_arg]
+        return arg
+
+    def probability(self, event: Callable[[Dict[str, np.ndarray]], bool]) -> float:
+        """Empirical probability of `event` over scenarios."""
+        return float(np.nanmean([float(event(s)) for s in (self.scenario(i) for i in range(self.n_scenarios))]))
+
+    def expectation(self, quantity: Callable[[Dict[str, np.ndarray]], float]) -> float:
+        """Empirical expectation of `quantity` over scenarios."""
+        return float(np.nanmean(self.map(quantity)))
+
+    def quantile(self, quantity: Callable[[Dict[str, np.ndarray]], float], q: float) -> float:
+        """Empirical quantile `q` (0..1) of `quantity` over scenarios."""
+        return float(np.nanquantile(self.map(quantity), q))
+
+    def min(self, arg: Union[str, Callable]) -> float:
+        """Minimum of `arg` across scenarios. `arg` can be a column name or a callable."""
+        f = self._resolve(arg)
+        return float(np.nanmin([np.nanmin(f(self.scenario(i))) for i in range(self.n_scenarios)]))
+
+    def max(self, arg: Union[str, Callable]) -> float:
+        """Maximum of `arg` across scenarios."""
+        f = self._resolve(arg)
+        return float(np.nanmax([np.nanmax(f(self.scenario(i))) for i in range(self.n_scenarios)]))
+
+    def highest(self, arg: Union[str, Callable]) -> Dict[str, np.ndarray]:
+        """Scenario achieving the highest value of `arg`."""
+        f = self._resolve(arg)
+        idx = int(np.argmax([np.nanmax(f(self.scenario(i))) for i in range(self.n_scenarios)]))
+        return self.scenario(idx)
+
+    def lowest(self, arg: Union[str, Callable]) -> Dict[str, np.ndarray]:
+        """Scenario achieving the lowest value of `arg`."""
+        f = self._resolve(arg)
+        idx = int(np.argmin([np.nanmin(f(self.scenario(i))) for i in range(self.n_scenarios)]))
+        return self.scenario(idx)
+
+    def dump(self, path: Union[str, Path]) -> None:
+        """Write the forecast to JSON at `path` (path-only — no file-handle support)."""
+        ctx_rows = self._rows_from_arrays(self.context_timestamps, self.context)
+        scen_rows = self._scenario_rows()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "columns": self.columns,
+                "context_steps": ctx_rows,
+                "scenarios": scen_rows,
+                "infos": self.infos,
+            }, f, indent=2)
+
+    def _rows_from_arrays(self, timestamps: np.ndarray, arrays: Dict[str, np.ndarray]) -> List[List[Union[int, float]]]:
+        """Reassemble row-major steps from per-column arrays."""
+        rows: List[List[Union[int, float]]] = []
+        for i, t in enumerate(timestamps.tolist()):
+            row: List[Union[int, float]] = [int(t)]
+            for c in self.columns:
+                if c == "timestamp":
+                    continue
+                row.append(float(arrays[c][i]))
+            rows.append(row)
+        return rows
+
+    def _scenario_rows(self) -> List[List[List[Union[int, float]]]]:
+        """Reassemble (n_scenarios, n_steps, n_cols) row-major scenarios for JSON dump."""
+        out: List[List[List[Union[int, float]]]] = []
+        ts_list = self.timestamps.tolist()
+        for s in range(self.n_scenarios):
+            scen: List[List[Union[int, float]]] = []
+            for i, t in enumerate(ts_list):
+                row: List[Union[int, float]] = [int(t)]
+                for c in self.columns:
+                    if c == "timestamp":
+                        continue
+                    row.append(float(self.scenarios[c][s, i]))
+                scen.append(row)
+            out.append(scen)
+        return out
+
     @classmethod
-    def load_json(cls, f: Union[str, Path, TextIO]) -> "Forecast":
-        """
-        Load a forecast from a json file.
-        """
-        with open(f, "r", encoding="utf-8") if isinstance(f, (str, Path)) else nullcontext(f) as f:
+    def load_json(cls, path: Union[str, Path]) -> "Forecast":
+        """Load a forecast previously written with `dump`."""
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return cls(**data)
+        return cls(
+            columns=data["columns"],
+            context_steps=data["context_steps"],
+            scenarios=data["scenarios"],
+            infos=data.get("infos", {}),
+        )
