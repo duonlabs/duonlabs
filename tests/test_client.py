@@ -77,6 +77,59 @@ def test_multi_pair_task_inference():
     ]
 
 
+def _ohlc_steps(start_ts_ms, freq_ms, n, key="pyth.Crypto.BTC-USD", base=100.0):
+    """Build a volume-less OHLC {columns, steps} payload directly (no builder helper)."""
+    columns = ["timestamp"] + [f"{key}.{c}" for c in ("open", "high", "low", "close")]
+    steps = [
+        [(start_ts_ms + i * freq_ms) // 1000, base + i, base + i + 1, base + i - 1, base + i + 0.5]
+        for i in range(n)
+    ]
+    return {"columns": columns, "steps": steps}
+
+
+def _capture_post(captured):
+    def fake_post(url, headers, json, timeout):
+        captured["payload"] = json
+        m = MagicMock()
+        m.json.return_value = _server_response(json)
+        m.raise_for_status.return_value = None
+        return m
+    return fake_post
+
+
+def test_next_price_inferred_for_volumeless_input():
+    end = int(time.time()) - 3600
+    start_ms = (end - 9 * 60) * 1000
+    steps = _ohlc_steps(start_ms, 60_000, 10)
+    client = DuonLabs(token="x")
+    captured = {}
+    with patch("duonlabs.client.requests.post", side_effect=_capture_post(captured)):
+        fc = client.forecast(keys="pyth.Crypto.BTC-USD", steps=steps)
+    assert captured["payload"]["task"] == "next_price"
+    assert fc["pyth.Crypto.BTC-USD.close"].shape == (1024, 10)
+    assert fc.cutoff("pyth.Crypto.BTC-USD.close") == pytest.approx(100.0 + 9 + 0.5)
+
+
+def test_explicit_task_overrides_inference():
+    end = int(time.time()) - 3600
+    start_ms = (end - 9 * 60) * 1000
+    steps = steps_from_ccxt({"binance.spot.BTCUSDT": _ccxt_rows(start_ms, 60_000, 10)})
+    client = DuonLabs(token="x")
+    captured = {}
+    with patch("duonlabs.client.requests.post", side_effect=_capture_post(captured)):
+        client.forecast(keys="binance.spot.BTCUSDT", steps=steps, task="next_price")
+    assert captured["payload"]["task"] == "next_price"
+
+
+def test_unknown_task_rejected():
+    end = int(time.time()) - 3600
+    start_ms = (end - 9 * 60) * 1000
+    steps = steps_from_ccxt({"binance.spot.BTCUSDT": _ccxt_rows(start_ms, 60_000, 10)})
+    client = DuonLabs(token="x")
+    with pytest.raises(ValueError, match="task must be one of"):
+        client.forecast(keys="binance.spot.BTCUSDT", steps=steps, task="bogus")
+
+
 def test_payload_omits_optional_fields_when_none():
     end = int(time.time()) - 3600
     start_ms = (end - 9 * 60) * 1000

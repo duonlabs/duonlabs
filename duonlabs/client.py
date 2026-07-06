@@ -17,6 +17,7 @@ from .utils import _assemble_columns, _validate_steps_shape
 
 
 SUPPORTED_FREQUENCIES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1d"]
+SUPPORTED_TASKS = ["next_candle", "next_price", "multi_asset_candle"]
 
 _FREQ_SECONDS: Dict[str, int] = {
     "1m": 60, "5m": 5 * 60, "15m": 15 * 60, "30m": 30 * 60,
@@ -57,6 +58,7 @@ class DuonLabs:
         seed: Optional[int] = None,
         top_p: Optional[float] = None,
         tag: Optional[str] = None,
+        task: Optional[str] = None,
     ) -> Forecast:
         """Generate a forecast for one or more pair keys.
 
@@ -72,6 +74,9 @@ class DuonLabs:
             seed: RNG seed; server picks one if omitted.
             top_p: Nucleus sampling threshold; server default if omitted.
             tag: User-defined telemetry tag.
+            task: Forecasting task. When omitted, inferred from the inputs: `multi_asset_candle`
+                for multiple keys, else `next_candle` when a `.volume` column is present and
+                `next_price` for volume-less (OHLC-only) inputs.
 
         Returns:
             A `Forecast` indexed by fully-qualified column names.
@@ -89,7 +94,13 @@ class DuonLabs:
             if "columns" not in steps or "steps" not in steps:
                 raise ValueError("steps must be a dict with 'columns' and 'steps' keys")
             _validate_steps_shape(steps["columns"], steps["steps"])
-        task = "next_candle" if len(keys_list) == 1 else "multi_asset_candle"
+        if task is None:
+            if len(keys_list) > 1:
+                task = "multi_asset_candle"
+            else:
+                task = "next_candle" if any(c.endswith(".volume") for c in steps["columns"]) else "next_price"
+        elif task not in SUPPORTED_TASKS:
+            raise ValueError(f"task must be one of {SUPPORTED_TASKS}")
         payload: Dict[str, Any] = {
             "inputs": {"columns": steps["columns"], "steps": steps["steps"]},
             "task": task,
