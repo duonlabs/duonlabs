@@ -10,7 +10,7 @@ Copyright (c) 2025 Duon labs
 import os
 import requests
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .forecast import Forecast
 from .utils import _assemble_columns, _validate_steps_shape
@@ -27,6 +27,7 @@ _FREQ_SECONDS: Dict[str, int] = {
 
 CONTEXT_SIZE = 256
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 
 
 class DuonLabs:
@@ -136,10 +137,12 @@ class DuonLabs:
         )
 
     def fetch_steps(self, keys: Union[str, List[str]], frequency: str) -> Dict[str, Any]:
-        """Fetch OHLCV candles from binance for every key and assemble a wire-format payload.
+        """Fetch OHLCV candles for every key and assemble a wire-format payload.
 
-        Only `binance.spot.*` keys are supported in the fetch path. For other providers/markets,
-        load data yourself and pass it via `steps=duonlabs.utils.steps_from_*(...)`.
+        Each key is routed to a venue by its provider prefix: `binance.spot.*` goes to the
+        binance klines endpoint, anything else is read as a hyperliquid market (core or
+        builder-deployed dex). For providers neither venue serves, load data yourself and
+        pass it via `steps=duonlabs.utils.steps_from_*(...)`.
 
         Args:
             keys: One key or a list of keys.
@@ -155,29 +158,19 @@ class DuonLabs:
         per_key: Dict[str, List[List[float]]] = {}
         per_key_ts: Dict[str, List[int]] = {}
         for key in keys_list:
-            symbol = self._binance_symbol(key)
-            r = requests.get(
-                BINANCE_KLINES_URL,
-                params={"interval": frequency, "limit": CONTEXT_SIZE, "symbol": symbol},
-                timeout=10,
-            )
-            r.raise_for_status()
-            ts: List[int] = []
-            ohlcv: List[List[float]] = []
-            for row in r.json():
-                ts.append(int(row[0]) // 1000)
-                ohlcv.append([float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
-            per_key_ts[key] = ts
-            per_key[key] = ohlcv
+            per_key_ts[key], per_key[key] = self._fetch_key_ohlcv(key, frequency)
         ## Cross-key alignment: every key must have the same timestamp set
-        ref_key = keys_list[0]
-        ref_ts = per_key_ts[ref_key]
-        for key in keys_list[1:]:
-            if per_key_ts[key] != ref_ts:
-                raise ValueError(
-                    f"binance returned misaligned timestamps for {key!r} vs {ref_key!r}; "
-                    "fetch data yourself and pass via duonlabs.utils.steps_from_frames"
-                )
+        ## Venues disagree on history depth, so intersect rather than requiring equality:
+        ## a binance key and a hyperliquid key rarely return the same window.
+        ref_ts = sorted(set.intersection(*(set(ts) for ts in per_key_ts.values())))
+        if len(ref_ts) < 2:
+            raise ValueError(
+                f"keys {keys_list!r} share fewer than 2 aligned timestamps at frequency {frequency!r}; "
+                "fetch data yourself and pass via duonlabs.utils.steps_from_frames"
+            )
+        for key in keys_list:
+            index = {t: i for i, t in enumerate(per_key_ts[key])}
+            per_key[key] = [per_key[key][index[t]] for t in ref_ts]
         ## Drop the partial last candle if its close-time is in the future
         import time as _time
         while ref_ts and ref_ts[-1] + freq_seconds > _time.time():
@@ -194,6 +187,62 @@ class DuonLabs:
         _validate_steps_shape(columns, steps)
         return {"columns": columns, "steps": steps}
 
+    def _fetch_key_ohlcv(self, key: str, frequency: str) -> Tuple[List[int], List[List[float]]]:
+        """Fetch one key's candles from whichever venue its provider prefix names.
+
+        Args:
+            key: Fully-qualified key, e.g. `binance.spot.BTCUSDT` or `xyz.perp.NVDA-USDC`.
+            frequency: Candle frequency.
+
+        Returns:
+            `(timestamps_seconds, [[open, high, low, close, volume], ...])`, oldest first.
+        """
+        if key.startswith("binance."):
+            return self._fetch_binance_ohlcv(self._binance_symbol(key), frequency)
+        return self._fetch_hyperliquid_ohlcv(self._hyperliquid_coin(key), frequency)
+
+    @staticmethod
+    def _fetch_binance_ohlcv(symbol: str, frequency: str) -> Tuple[List[int], List[List[float]]]:
+        """Fetch `CONTEXT_SIZE` candles for a binance symbol from the klines endpoint."""
+        r = requests.get(
+            BINANCE_KLINES_URL,
+            params={"interval": frequency, "limit": CONTEXT_SIZE, "symbol": symbol},
+            timeout=10,
+        )
+        r.raise_for_status()
+        ts: List[int] = []
+        ohlcv: List[List[float]] = []
+        for row in r.json():
+            ts.append(int(row[0]) // 1000)
+            ohlcv.append([float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
+        return ts, ohlcv
+
+    @staticmethod
+    def _fetch_hyperliquid_ohlcv(coin: str, frequency: str) -> Tuple[List[int], List[List[float]]]:
+        """Fetch `CONTEXT_SIZE` candles for a hyperliquid coin from the info endpoint.
+
+        `candleSnapshot` is window-addressed rather than count-addressed, so the window is
+        sized from the frequency and the tail is trimmed to `CONTEXT_SIZE`.
+        """
+        import time as _time
+        end_ms = int(_time.time() * 1000)
+        start_ms = end_ms - (CONTEXT_SIZE + 1) * _FREQ_SECONDS[frequency] * 1000
+        r = requests.post(
+            HYPERLIQUID_INFO_URL,
+            json={"type": "candleSnapshot", "req": {"coin": coin, "interval": frequency, "startTime": start_ms, "endTime": end_ms}},
+            timeout=10,
+        )
+        r.raise_for_status()
+        candles = r.json() or []
+        if not candles:
+            raise ValueError(f"hyperliquid returned no candles for coin {coin!r} at frequency {frequency!r}")
+        ts: List[int] = []
+        ohlcv: List[List[float]] = []
+        for candle in candles[-CONTEXT_SIZE:]:
+            ts.append(int(candle["t"]) // 1000)
+            ohlcv.append([float(candle["o"]), float(candle["h"]), float(candle["l"]), float(candle["c"]), float(candle["v"])])
+        return ts, ohlcv
+
     @staticmethod
     def _binance_symbol(key: str) -> str:
         """Parse a `binance.spot.SYMBOL` key into the symbol used by the binance klines endpoint."""
@@ -204,3 +253,19 @@ class DuonLabs:
                 "for other providers/markets, fetch data yourself and pass via duonlabs.utils.steps_from_frames"
             )
         return parts[2]
+
+    @staticmethod
+    def _hyperliquid_coin(key: str) -> str:
+        """Parse a `<provider>.perp.<BASE>-<QUOTE>` key into a hyperliquid `coin` identifier.
+
+        `hyperliquid` is the core perp venue and addresses markets by bare base symbol;
+        every other provider is a builder-deployed (HIP-3) dex, addressed as `<dex>:<BASE>`.
+        """
+        parts = key.split(".")
+        if len(parts) != 3 or parts[1] != "perp":
+            raise ValueError(
+                f"hyperliquid fetch only supports keys of the form '<provider>.perp.<BASE>-<QUOTE>' (got {key!r}); "
+                "for other providers/markets, fetch data yourself and pass via duonlabs.utils.steps_from_frames"
+            )
+        base = parts[2].split("-")[0]
+        return base if parts[0] == "hyperliquid" else f"{parts[0]}:{base}"

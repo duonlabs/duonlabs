@@ -170,22 +170,77 @@ def test_fetch_steps_non_binance_spot_key_rejected():
         client.fetch_steps(["binance.futures.um.BTCUSDT"], "4h")
 
 
-def test_fetch_steps_alignment_mismatch():
-    client = DuonLabs(token="x")
-    end = int(time.time()) - 3600
-    start_eth_ms = (end - 199 * 60) * 1000
-    start_btc_ms = start_eth_ms + 60_000  # shifted
-
+def _shifted_klines_get(start_a_ms: int, start_b_ms: int, n: int = 200):
+    """Build a requests.get double serving two symbols over differently-offset windows."""
     def fake_get(url, params, timeout):
         m = MagicMock()
         m.raise_for_status.return_value = None
-        sym = params["symbol"]
-        start = start_eth_ms if sym == "ETHUSDT" else start_btc_ms
+        start = start_a_ms if params["symbol"] == "ETHUSDT" else start_b_ms
         m.json.return_value = [
-            [start + i * 60_000, "1", "2", "0", "1", "10"] for i in range(200)
+            [start + i * 60_000, "1", "2", "0", "1", "10"] for i in range(n)
+        ]
+        return m
+    return fake_get
+
+
+def test_fetch_steps_alignment_intersects_overlapping_windows():
+    """Keys whose windows only partly overlap are intersected down to the shared tail."""
+    client = DuonLabs(token="x")
+    end = int(time.time()) - 3600
+    start_eth_ms = (end - 199 * 60) * 1000
+    start_btc_ms = start_eth_ms + 60_000  # shifted by one candle
+
+    with patch("duonlabs.client.requests.get", side_effect=_shifted_klines_get(start_eth_ms, start_btc_ms)):
+        payload = client.fetch_steps(["binance.spot.ETHUSDT", "binance.spot.BTCUSDT"], "1m")
+    assert len(payload["steps"]) == 199
+    assert payload["steps"][0][0] == start_btc_ms // 1000
+
+
+def test_fetch_steps_alignment_disjoint_windows_rejected():
+    """Windows that share no timestamps cannot be aligned at all."""
+    client = DuonLabs(token="x")
+    end = int(time.time()) - 3600
+    start_eth_ms = (end - 199 * 60) * 1000
+    start_btc_ms = start_eth_ms - 1000 * 60 * 1000  # far enough back to not overlap
+
+    with patch("duonlabs.client.requests.get", side_effect=_shifted_klines_get(start_eth_ms, start_btc_ms)):
+        with pytest.raises(ValueError, match="fewer than 2 aligned timestamps"):
+            client.fetch_steps(["binance.spot.ETHUSDT", "binance.spot.BTCUSDT"], "1m")
+
+
+@pytest.mark.parametrize("key, coin", [
+    ("hyperliquid.perp.BTC-USDC", "BTC"),
+    ("xyz.perp.NVDA-USDC", "xyz:NVDA"),
+    ("km.perp.AAPL-USDH", "km:AAPL"),
+    ("cash.perp.TSLA-USDT0", "cash:TSLA"),
+])
+def test_hyperliquid_coin_parsing(key, coin):
+    """Core perps address by bare symbol; builder-deployed dexes by `<dex>:<BASE>`."""
+    assert DuonLabs._hyperliquid_coin(key) == coin
+
+
+def test_hyperliquid_coin_rejects_non_perp_key():
+    with pytest.raises(ValueError, match="<provider>.perp"):
+        DuonLabs._hyperliquid_coin("hyperliquid.spot.PURR-USDC")
+
+
+def test_fetch_steps_routes_non_binance_key_to_hyperliquid():
+    """A hydromancer dex key is fetched from the hyperliquid info endpoint, not binance."""
+    client = DuonLabs(token="x")
+    end = int(time.time()) - 3600
+    start_ms = (end - 199 * 60) * 1000
+
+    def fake_post(url, json, timeout):
+        assert json["req"]["coin"] == "xyz:NVDA"
+        m = MagicMock()
+        m.raise_for_status.return_value = None
+        m.json.return_value = [
+            {"t": start_ms + i * 60_000, "o": "1", "h": "2", "l": "0", "c": "1", "v": "10", "n": 3}
+            for i in range(200)
         ]
         return m
 
-    with patch("duonlabs.client.requests.get", side_effect=fake_get):
-        with pytest.raises(ValueError, match="misaligned"):
-            client.fetch_steps(["binance.spot.ETHUSDT", "binance.spot.BTCUSDT"], "1m")
+    with patch("duonlabs.client.requests.post", side_effect=fake_post):
+        payload = client.fetch_steps("xyz.perp.NVDA-USDC", "1m")
+    assert payload["columns"] == ["timestamp"] + [f"xyz.perp.NVDA-USDC.{c}" for c in ("open", "high", "low", "close", "volume")]
+    assert len(payload["steps"]) == 200

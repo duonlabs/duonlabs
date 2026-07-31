@@ -14,6 +14,32 @@ from contextlib import nullcontext
 from .utils import ListofListsofNumbers
 
 
+def _bare_aliases(channel_names: List[str]) -> Dict[str, str]:
+    """Map each unambiguous bare column suffix to its fully-qualified channel name.
+
+    v2 payloads name channels `<key>.<column>` (`binance.spot.BTCUSDT.close`) while this class
+    and everything built on it — `cutoff_close`, `contiguous_scenarios["high"]`, `hold_score` —
+    address them bare. Aliasing bridges the two. A suffix carried by more than one channel is
+    left out: in a multi-asset payload `close` names no single series, so resolving it would
+    have to pick one arbitrarily.
+
+    Args:
+        channel_names: Channel names as sent in the payload.
+
+    Returns:
+        `{bare_suffix: qualified_name}` for every suffix owned by exactly one channel.
+    """
+    counts: Dict[str, int] = {}
+    for name in channel_names:
+        if "." in name:
+            counts[name.rpartition(".")[2]] = counts.get(name.rpartition(".")[2], 0) + 1
+    return {
+        name.rpartition(".")[2]: name
+        for name in channel_names
+        if "." in name and counts[name.rpartition(".")[2]] == 1 and name.rpartition(".")[2] not in channel_names
+    }
+
+
 class Forecast:
     channel_names = ["timestamp", "open", "high", "low", "close", "volume"]
     channel_dtypes = [int, float, float, float, float, float]
@@ -43,6 +69,12 @@ class Forecast:
         # Save as numpy arrays
         self.context = {k: np.array(v) for k, v in self.context.items()}
         self.scenarios = [{k: np.array(v) for k, v in scenario.items()} for scenario in self.scenarios]
+        # Expose fully-qualified v2 channels under their bare names too, so bare-name consumers
+        # keep working. Aliases share the underlying arrays rather than copying them.
+        aliases = _bare_aliases(channel_names)
+        self.context.update({bare: self.context[full] for bare, full in aliases.items()})
+        for scenario in self.scenarios:
+            scenario.update({bare: scenario[full] for bare, full in aliases.items()})
         # Save cutoff close
         self.cutoff_close = self.context["close"][-1].item()
 

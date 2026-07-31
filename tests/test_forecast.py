@@ -102,3 +102,39 @@ def test_dump_load_roundtrip(tmp_path):
     np.testing.assert_array_equal(fc["binance.spot.BTCUSDT.close"], fc2["binance.spot.BTCUSDT.close"])
     np.testing.assert_array_equal(fc.context["binance.spot.BTCUSDT.close"], fc2.context["binance.spot.BTCUSDT.close"])
     assert fc2.infos["model"] == "test"
+
+
+## Forward-compat: v2 fully-qualified channel names on the legacy Forecast
+
+def _qualified_forecast(keys):
+    """Build a legacy Forecast whose channels are named `<key>.<column>` (v2 style)."""
+    from duonlabs.legacy.forecast import Forecast
+    columns = ["timestamp"] + [f"{k}.{c}" for k in keys for c in ("open", "high", "low", "close", "volume")]
+    width = len(columns)
+    context = [[1000 + i * 60] + [10.0 + i, 11.0 + i, 9.0 + i, 10.5 + i, 1.0] * len(keys) for i in range(5)]
+    scenarios = [[[1300 + j * 60] + [10.0, 11.0, 9.0, 10.5 + j, 1.0] * len(keys) for j in range(3)] for _ in range(4)]
+    assert all(len(r) == width for r in context)
+    return Forecast(context=context, scenarios=scenarios, channel_names=columns)
+
+
+def test_qualified_channels_alias_to_bare_names():
+    """A single-key v2 payload resolves bare `close`, so cutoff_close and friends keep working."""
+    fc = _qualified_forecast(["binance.spot.BTCUSDT"])
+    assert fc.cutoff_close == 14.5
+    assert fc.context["close"].tolist() == fc.context["binance.spot.BTCUSDT.close"].tolist()
+    assert fc.scenarios[0]["high"].tolist() == fc.scenarios[0]["binance.spot.BTCUSDT.high"].tolist()
+
+
+def test_bare_channels_are_untouched():
+    """Legacy bare-name payloads gain no aliases and behave exactly as before."""
+    from duonlabs.legacy.forecast import Forecast
+    fc = Forecast(context=[[1, 1.0, 2.0, 0.5, 1.5, 1.0]] * 3, scenarios=[[[1, 1.0, 2.0, 0.5, 1.5, 1.0]]] * 2)
+    assert fc.cutoff_close == 1.5
+    assert set(fc.context) == {"timestamp", "open", "high", "low", "close", "volume"}
+
+
+def test_ambiguous_suffix_is_not_aliased():
+    """Multi-asset payloads leave `close` unaliased — no single series owns the name."""
+    from duonlabs.legacy.forecast import _bare_aliases
+    columns = ["timestamp"] + [f"{k}.{c}" for k in ("a.b.X", "a.b.Y") for c in ("open", "close")]
+    assert _bare_aliases(columns) == {}
